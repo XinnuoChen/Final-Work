@@ -1,0 +1,844 @@
+---
+title: "Untitled"
+author: "Xinnuo Chen"
+date: "2025-02-18"
+output: html_document
+---
+
+
+```{r}
+# Paleta de colors
+
+# install.packages("paletteer")
+# install.packages("scales")
+library(paletteer)
+library(scales)
+colour.patteer <- paletteer_c("ggthemes::Classic Orange-Blue", 80)
+
+colour.patteer
+```
+
+```{r}
+# Llibreries
+# install.packages("synthpop")
+library("synthpop")
+
+# install.packages("NbClust")
+library("NbClust")
+
+library(ggplot2)
+library(factoextra)
+
+# install.packages("DescTools") #index de Gini
+library(DescTools)
+
+library(cluster) #index de Silhouette
+
+# install.packages("label.switching")
+library(label.switching)
+
+library(car) #scatterplot
+
+
+```
+
+
+
+# Real data generation
+```{r}
+my.seed <- 12345
+set.seed(my.seed)
+
+# Data without pattern
+h1 <- rnorm(120, mean = 175, sd = 15)
+w1 <- rnorm(120, mean = 75, sd = 20)
+real.data.1 <- data.frame(height = h1, weight = w1)
+
+# Dara with pattern
+group <- rep(1:2, each=60)
+h2 <- c(rnorm(60, mean = 165, sd = 3), rnorm(60, mean = 185, sd = 3))
+w2 <- c(rnorm(60, mean = 55, sd = 2), rnorm(60, mean = 75, sd = 2))
+real.data.2 <- data.frame(height = h2, weight = w2, group = as.factor(group))
+
+# Graphing the data
+par(mfrow = c(1, 2))
+
+plot(real.data.1$height, real.data.1$weight, main = "Whitout pattern", xlab = "HEIGHT", ylab = "WEIGHT", col = "blue", pch = 19)
+plot(real.data.2$height, real.data.2$weight, main = "With pattern", xlab = "HEIGHT", ylab = "WEIGHT", col = real.data.2$group, pch = 19)
+```
+
+# NO PATTERN
+```{r}
+colours <- colour.patteer[c(23, 78, 43)]
+```
+
+## Synthethic data generation
+```{r}
+# install.packages("synthpop")
+# library("synthpop")
+# head(real.data.1)
+
+m <- 1
+# m <- 1000
+
+sds.default1 <- syn(real.data.1, method = "cart", seed = my.seed, m = m, print.flag = FALSE)
+# sds.default1 <- syn(real.data.1, method = "parametric", seed = my.seed, m = m, print.flag = FALSE)
+synt.data.1 <- sds.default1$syn
+# synt.data.1[1]
+```
+
+```{r}
+# sds.default1$method
+```
+
+El mètode aplicat per la primera variable és "sample", en lloc de "cart", això es degut a que el mètode "cart" necessita de predictors per la generació de dades sintètiques. Degut a que es tracta de la primera variable, no té cap predictor disponibles per davant, i per aquest motiu s'aplica el mètode "sample", que el que fa es un mostreig aleatori amb reemplaçament de la variable original. 
+
+
+```{r}
+# library(tidyverse)
+
+# ks test 
+# scatterplot, color diferencial real i sintetica
+
+# Weight
+data.type <- rep(c("Real","Synt"), each=120)
+data1.weight <- c(real.data.1[,2], synt.data.1[,2])
+w.combined_data1 <- data.frame(type = data.type, weight = data1.weight)
+
+w.combined_data1 %>%
+    ggplot(aes(x = weight, fill = type)) +
+    geom_density(alpha = 0.5) +
+    scale_fill_manual(values = c("gray60", "orangered2")) +
+    labs(title = "Weight",
+         fill = "Data type") +
+    theme_bw() +
+    theme(legend.position = "bottom")
+
+# Height
+data1.height <- c(real.data.1[,1], synt.data.1[,1])
+h.combined_data1 <- data.frame(type = data.type, height = data1.height)
+
+h.combined_data1 %>%
+    ggplot(aes(x = height, fill = type)) +
+    geom_density(alpha = 0.5) +
+    scale_fill_manual(values = c("gray60", "orangered2")) +
+    labs(title = "Height",
+         fill = "Data type") +
+    theme_bw() +
+    theme(legend.position = "bottom")
+```
+
+
+## REAL DATA 
+### K decision
+```{r}
+# install.packages("NbClust")
+# library("NbClust")
+kopt.real1 <- NbClust(data = real.data.1, diss = NULL, distance = "euclidean", method = "kmeans", index = "all", alphaBeale = 0.1)
+
+k.real1 <- as.numeric(names(table(as.vector(kopt.real1$Best.nc[1,])))[which.max(table(as.vector(kopt.real1$Best.nc[1,])))]) #nombre de cluster optim
+```
+
+### K-means
+```{r}
+sreal.data.1 <- scale(real.data.1)
+# head(sreal.data.1, n = 3)
+
+set.seed(my.seed)
+km.real1 <- kmeans(sreal.data.1, k.real1, nstart = 25)
+
+# library(ggplot2)
+# library(factoextra)
+fviz_cluster(km.real1, data = sreal.data.1,
+             palette = colours[1:k.real1],
+             ellipse.type = "euclid", # Concentration ellipse
+             star.plot = TRUE, # Add segments from centroids to items
+             repel = TRUE, # Avoid label overplotting (slow)
+             ggtheme = theme_minimal())
+```
+Per evitar dependencia de la unitat de la variable s'escala el dataset abans d'aplicar el kmeans.
+
+nstart indica el nombre de vegades que l'algoritme k-means s'executa amb diferents inicialitzacions aleatòries dels centres dels k clusters assignats.
+
+
+## SYNTHETIC DATA
+
+### K decision
+```{r}
+kopt.synt1 <- NbClust(data = synt.data.1, diss = NULL, distance = "euclidean", method = "kmeans", index = "all", alphaBeale = 0.1)
+
+k.synt1 <- as.numeric(names(table(as.vector(kopt.synt1$Best.nc[1,])))[which.max(table(as.vector(kopt.synt1$Best.nc[1,])))])
+```
+
+### K-means
+```{r}
+ssynt.data.1 <- scale(synt.data.1)
+# head(ssynt.data.1, n = 3)
+
+set.seed(my.seed)
+km.synt1 <- kmeans(ssynt.data.1, k.synt1, nstart = 25)
+
+fviz_cluster(km.synt1, data = ssynt.data.1,
+             palette = colours[1:k.synt1],
+             ellipse.type = "euclid", # Concentration ellipse
+             star.plot = TRUE, # Add segments from centroids to items
+             repel = TRUE, # Avoid label overplotting (slow)
+             ggtheme = theme_minimal())
+```
+
+## SPECKS
+```{r}
+# Calculem el SPECKS amb el paquet synthpop
+utilityGen1 <- utility.gen(sds.default1, real.data.1, method = "cart", print.flag = FALSE)
+(specks1 <- utilityGen1$SPECKS)
+```
+
+```{r}
+combined_data <- rbind(
+  cbind(real.data.1, label = 0), # Original data (label = 0)
+  cbind(synt.data.1, label = 1) # Synthetic data (label = 1)
+)
+
+B <- 10000
+n1 <- nrow(real.data.1)
+n2 <- nrow(synt.data.1)
+N <- n1+n2
+specks.boot <- numeric(B) #vactor buit on guardo les 2000 estimacions de quocient
+set.seed(1234)
+for(b in 1:B){
+  boot.data <- combined_data
+  i <- sample(1:N, size=n1, replace=T)
+  boot.data$label <- combined_data[i,3]
+  
+  cart_model <- rpart(
+  formula = label ~ .,             # label com a resposta, la resta com a predictors
+  data = boot.data,
+  method = "class",                # arbre de classificació
+  control = rpart.control(mincriterion = 0, 
+            minbucket = 5, 
+            cp = 1e-3))
+  
+  pred_prob <- predict(cart_model, type = "prob")[, 2]
+  
+  label_vector <- boot.data$label
+  
+  p_hat_real  <- pred_prob[label_vector == 0]
+  p_hat_synth <- pred_prob[label_vector == 1]
+
+  ecdf_real  <- ecdf(p_hat_real)
+  ecdf_synth <- ecdf(p_hat_synth)
+
+  all_scores <- sort(unique(c(p_hat_real, p_hat_synth)))
+
+  specks.boot[b] <- max(abs(ecdf_real(all_scores) - ecdf_synth(all_scores)))
+}
+
+pConf <- c(0.025, 0.975)
+tBoot.2 <- quantile(abs(specks.boot),probs= pConf)
+hist(specks.boot, breaks=50, freq=F)
+abline(v=specks1, col="red", lwd = 2, lty = 2)
+abline(v = tBoot.2[1], col = "blue", lwd = 2, lty = 2)
+abline(v = tBoot.2[2], col = "blue", lwd = 2, lty = 2)
+```
+
+
+## Metriques clustering
+
+### Label switching
+```{r}
+centroids1 <- rbind(km.real1$centers, km.synt1$centers)
+
+# distancies
+dist.global1 <- as.matrix(dist(centroids1, method = "euclidean"))
+
+n.real1 <- nrow(km.real1$centers)
+n.synt1 <- nrow(km.synt1$centers) 
+dist1 <- dist.global1[1:n.real1, (n.real1 + 1) : (n.real1 + n.synt1)]
+
+label.ass <- solve_LSAP(dist1) # assignació 1 a 1 minimitzant la suma de distàncies
+
+# Reetiquetació els clústers sintètics
+km.synt1$recluster <- km.real1$cluster
+
+for (i in seq_along(label.ass)) {
+  km.synt1$recluster[km.synt1$cluster == label.ass[i]] <- i
+}
+
+```
+
+
+```{r}
+# Nombre de cluster
+#clust.num1 <- max(k.real1, k.synt1)/min(k.real1, k.synt1)
+clust.num1 <- k.real1/k.synt1
+
+# Nombre d'observacions dins de clúster - Chi-Quadrat (entra 0 i 1)
+## matriu de confucio -> accuracy
+clust.size1 <- rbind(km.real1$size, km.synt1$size)
+rownames(clust.size1) <- c("Real", "Synthetic")
+colnames(clust.size1) <- c("Cluster1", "Cluster2")
+
+chisq1 <- chisq.test(clust.size1)$p.value
+
+# Índex de Gini (entre 0 i 1)
+gini.real1 <- Gini(km.real1$size)
+gini.synt1 <- Gini(km.synt1$size)
+# (gini1 <- abs(gini.real1 - gini.synt1))
+# gini1 <- max(gini.real1, gini.synt1)/min(gini.real1, gini.synt1)
+gini1 <- gini.real1/gini.synt1
+
+# Coeficient de silhouette (entre -1 i 1)
+# library(cluster)
+sil.real1 <- mean(silhouette(km.real1$cluster, dist(real.data.1))[,3])
+# plot(silhouette(km.real1$cluster, dist(real.data.1)))
+
+sil.synt1 <- mean(silhouette(km.synt1$cluster, dist(synt.data.1))[,3])
+# (sil1 <- abs(sil.real1 - sil.synt1))
+# sil1 <- max(sil.real1, sil.synt1)/min(sil.real1, sil.synt1)
+sil1 <- sil.real1/sil.synt1
+
+# Distancia mitjana entre centroides
+lreal.data.1 <- real.data.1
+lreal.data.1$label <- as.factor(km.real1$cluster)
+lsynt.data.1 <- synt.data.1
+lsynt.data.1$label <- as.factor(km.synt1$recluster)
+
+real.centroid1 <- aggregate(cbind(height, weight) ~ label,
+                            data = lreal.data.1,
+                            FUN = mean)
+synt.centroid1 <- aggregate(cbind(height, weight) ~ label,
+                                 data = lsynt.data.1,
+                                 FUN = mean)
+#ordenar
+real.centroid1 <- real.centroid1[order(real.centroid1$label), ]
+synt.centroid1 <- synt.centroid1[order(synt.centroid1$label), ]
+#distancia
+distances <- sqrt(
+  (real.centroid1$height - synt.centroid1$height)^2 + 
+  (real.centroid1$weight - synt.centroid1$weight)^2
+)
+mean.distance <- mean(distances)
+
+# Variancia mitjana entre centroides
+real.var1 <- aggregate(cbind(height, weight) ~ label,
+                            data = lreal.data.1,
+                            FUN = var)
+synt.var1 <- aggregate(cbind(height, weight) ~ label,
+                                 data = lsynt.data.1,
+                                 FUN = var)
+#ordenar
+real.var1 <- real.var1[order(real.var1$label), ]
+synt.var1 <- synt.var1[order(synt.var1$label), ]
+real.var1 <- real.var1[,-1]
+synt.var1 <- synt.var1[,-1]
+#variancia mitjana
+dif.var1 <- abs(real.var1 - synt.var1)
+mean.var1 <- mean(unlist(dif.var1))
+```
+
+## Generalitzant
+```{r}
+load("Phase0_v1.RData")
+```
+
+```{r}
+set.seed(my.seed)
+m <- 100
+
+sds.default1 <- syn(real.data.1, method = "cart", seed = my.seed, m = m, print.flag = FALSE)
+synt.data.1 <- sds.default1$syn
+# synt.data.1[1]
+
+k.synt1 <- numeric(m) #vector nombre de k
+ssynt.data.1 <- list(m) #dataframe escalat
+km.synt1 <- list(m)
+
+for (i in 1:m){
+  kopt.synt1 <- suppressMessages(NbClust(data = synt.data.1[[i]], diss = NULL, distance = "euclidean", method = "kmeans", index = "all", alphaBeale = 0.1))
+  k.synt1[i] <- as.numeric(names(table(as.vector(kopt.synt1$Best.nc[1,])))[which.max(table(as.vector(kopt.synt1$Best.nc[1,])))])
+  
+  ssynt.data.1[[i]] <- scale(synt.data.1[[i]])
+
+  set.seed(my.seed)
+  km.synt1[[i]] <- kmeans(ssynt.data.1[[i]], k.synt1[i], nstart = 25)
+}
+
+```
+
+
+### SPECKS
+```{r}
+utilityGen1 <- utility.gen(sds.default1, real.data.1, method = "cart", print.flag = FALSE)
+specks1 <- utilityGen1$SPECKS
+```
+
+### Metriques clustering
+
+```{r}
+clust.num1 <- numeric(m)
+chisq1 <- numeric(m)
+gini1 <- numeric(m)
+sil1 <- numeric(m)
+#mean1 <- numeric(m)
+#var1 <- numeric(m)
+
+k.real1 <- rep(k.real1,m)
+
+for(i in 1:m){
+  
+  if(k.real1[i] == k.synt1[i]){
+    
+    ### label switching ###
+#    centroids1 <- rbind(km.real1$centers, km.synt1[[i]]$centers)
+
+    # distancies
+#    dist.global1 <- as.matrix(dist(centroids1, method = "euclidean"))
+    
+#    n.real1 <- nrow(km.real1$centers)
+#    n.synt1 <- nrow(km.synt1[[i]]$centers) 
+#    dist1 <- dist.global1[1:n.real1, (n.real1 + 1) : (n.real1 + n.synt1)]
+    
+#    label.ass <- solve_LSAP(dist1) # assignació 1 a 1 minimitzant la suma de distàncies
+    
+    # Reetiquetació els clústers sintètics
+#    km.synt1[[i]]$recluster <- km.real1$cluster
+    
+#    for (i in seq_along(label.ass)) {
+#      km.synt1[[i]]$recluster[km.synt1[[i]]$cluster == label.ass[i]] <- i
+#    }
+    
+    
+    
+    # Nombre de cluster
+    # clust.num1[i] <- max(k.real1[i], k.synt1[i])/min(k.real1[i], k.synt1[i])
+    clust.num1[i] <- k.real1[i]/k.synt1[i]
+    
+    # Coeficient de silhouette
+    sil.real1 <- mean(silhouette(km.real1$cluster, dist(real.data.1))[,3])
+    sil.synt1 <- mean(silhouette(km.synt1[[i]]$cluster, dist(synt.data.1[[i]]))[,3])
+    # sil1 <- abs(sil.real1 - sil.synt1)
+    # sil1[i] <- max(sil.real1, sil.synt1)/min(sil.real1, sil.synt1)
+    sil1[i] <- sil.real1/sil.synt1
+  
+    # Nombre d'observacions dins de clúster - Chi-Quadrat
+    clust.size1 <- rbind(km.real1$size, km.synt1[[i]]$size)
+    chisq1[i] <- chisq.test(clust.size1)$p.value
+    
+    # Índex de Gini
+    gini.real1 <- Gini(km.real1$size)
+    gini.synt1 <- Gini(km.synt1[[i]]$size)
+    # (gini1 <- abs(gini.real1 - gini.synt1))
+    # gini1[i] <- max(gini.real1, gini.synt1)/min(gini.real1, gini.synt1)
+    gini1[i] <- gini.real1/gini.synt1
+    
+    # Distancia mitjana entre centroides
+#    lreal.data.1 <- real.data.1
+#    lreal.data.1$label <- as.factor(km.real1$cluster)
+#    lsynt.data.1 <- synt.data.1[[i]]
+#    lsynt.data.1$label <- as.factor(km.synt1[[i]]$recluster)
+    
+#    real.centroid1 <- aggregate(cbind(height, weight) ~ label,
+#                                data = lreal.data.1,
+#                                FUN = mean)
+#    synt.centroid1 <- aggregate(cbind(height, weight) ~ label,
+#                                     data = lsynt.data.1,
+#                                     FUN = mean)
+    #ordenar
+#    real.centroid1 <- real.centroid1[order(real.centroid1$label), ]
+#    synt.centroid1 <- synt.centroid1[order(synt.centroid1$label), ]
+    #distancia
+#    distances <- sqrt(
+#     (real.centroid1$height - synt.centroid1$height)^2 + 
+#     (real.centroid1$weight - synt.centroid1$weight)^2
+#    )
+#    mean1[i] <- mean(distances)
+    
+    # Variancia mitjana entre centroides
+#    real.var1 <- aggregate(cbind(height, weight) ~ label,
+#                               data = lreal.data.1,
+#                               FUN = var)
+#    synt.var1 <- aggregate(cbind(height, weight) ~ label,
+#                                     data = lsynt.data.1,
+#                                     FUN = var)
+    #ordenar
+#    real.var1 <- real.var1[order(real.var1$label), ]
+#    synt.var1 <- synt.var1[order(synt.var1$label), ]
+#    real.var1 <- real.var1[,-1]
+#    synt.var1 <- synt.var1[,-1]
+    #variancia mitjana
+#    dif.var1 <- abs(real.var1 - synt.var1)
+#    var1[i] <- mean(unlist(dif.var1))
+    
+  } else {
+    # Nombre de cluster
+    # clust.num1[i] <- max(k.real1[i], k.synt1[i])/min(k.real1[i], k.synt1[i])
+    clust.num1[i] <- k.real1[i]/k.synt1[i]
+    
+    # Coeficient de silhouette
+    sil.real1 <- mean(silhouette(km.real1$cluster, dist(real.data.1))[,3])
+    sil.synt1 <- mean(silhouette(km.synt1[[i]]$cluster, dist(synt.data.1[[i]]))[,3])
+    # sil1 <- abs(sil.real1 - sil.synt1)
+    # sil1[i] <- max(sil.real1, sil.synt1)/min(sil.real1, sil.synt1)
+    sil1[i] <- sil.real1/sil.synt1
+    
+    chisq1[i] <- NA
+    gini1[i] <- NA
+    #mean1[i] <- NA
+    #var1[i] <- NA
+  }
+}
+```
+
+
+```{r}
+metriques1 <- data.frame(clust.num = clust.num1, sil = sil1)
+metriques1.omit <- data.frame(specks = specks1,chisq = chisq1, gini = gini1)
+
+metriques1.omit <- metriques1.omit[complete.cases(metriques1.omit), ]
+metriques1.omit <- metriques1.omit[!is.infinite(rowSums(metriques1.omit)), ]
+```
+
+
+### Comparació
+#### Gràfiques
+```{r}
+#library(car)
+
+par(mfrow = c(2, 2))
+scatterplot(specks1, metriques1$clust.num, xlab = "SPECKS", ylab = "NUMBER OF CLUSTER", pch = 19)
+scatterplot(specks1, metriques1$sil, xlab = "SPECKS", ylab = "SILHOUETTE", pch = 19)
+scatterplot(metriques1.omit$specks, metriques1.omit$chisq, xlab = "SPECKS", ylab = "CHISQ", pch = 19)
+scatterplot(metriques1.omit$specks, metriques1.omit$gini, xlab = "SPECKS", ylab = "GINI", pch = 19)
+```
+
+#### Numèriques
+```{r}
+cor(specks1, metriques1$clust.num, method = "pearson")
+cor(specks1, metriques1$clust.num, method = "spearman")
+cor(specks1, metriques1$clust.num, method = "kendall")
+
+cor(specks1, metriques1$sil, method = "pearson")
+cor(specks1, metriques1$sil, method = "spearman")
+cor(specks1, metriques1$sil, method = "kendall")
+
+cor(metriques1.omit$specks, metriques1.omit$chisq, method = "pearson")
+cor(metriques1.omit$specks, metriques1.omit$chisq, method = "spearman")
+cor(metriques1.omit$specks, metriques1.omit$chisq, method = "kendall")
+
+cor(metriques1.omit$specks, metriques1.omit$gini, method = "pearson")
+cor(metriques1.omit$specks, metriques1.omit$gini, method = "spearman")
+cor(metriques1.omit$specks, metriques1.omit$gini, method = "kendall")
+```
+
+
+
+# PATTERN
+## Synthethic data generation
+```{r}
+# install.packages("synthpop")
+# library("synthpop")
+real.data.2 <- real.data.2[,c("height", "weight")]
+head(real.data.2)
+
+sds.default2 <- syn(real.data.2, method = "cart", seed = my.seed)
+synt.data.2 <- sds.default2$syn
+```
+
+```{r}
+# Weight
+data.type <- rep(c("Real","Synt"), each=120)
+data2.weight <- c(real.data.2[,2], synt.data.2[,2])
+w.combined_data2 <- data.frame(type = data.type, weight = data2.weight)
+
+w.combined_data2 %>%
+    ggplot(aes(x = weight, fill = type)) +
+    geom_density(alpha = 0.5) +
+    scale_fill_manual(values = c("gray60", "orangered2")) +
+    labs(title = "Weight",
+         fill = "Data type") +
+    theme_bw() +
+    theme(legend.position = "bottom")
+
+# Height
+data2.height <- c(real.data.2[,1], synt.data.2[,1])
+h.combined_data2 <- data.frame(type = data.type, height = data2.height)
+
+h.combined_data2 %>%
+    ggplot(aes(x = height, fill = type)) +
+    geom_density(alpha = 0.5) +
+    scale_fill_manual(values = c("gray60", "orangered2")) +
+    labs(title = "Height",
+         fill = "Data type") +
+    theme_bw() +
+    theme(legend.position = "bottom")
+```
+
+
+## REAL DATA 
+### K decision
+```{r}
+# install.packages("NbClust")
+# library("NbClust")
+kopt.real2 <- NbClust(data = real.data.2, diss = NULL, distance = "euclidean", method = "kmeans", index = "all", alphaBeale = 0.1)
+
+k.real2 <- as.numeric(names(table(as.vector(kopt.real2$Best.nc[1,])))[which.max(table(as.vector(kopt.real2$Best.nc[1,])))])
+```
+
+### K-means
+```{r}
+sreal.data.2 <- scale(real.data.2)
+head(sreal.data.2, n = 3)
+
+set.seed(my.seed)
+km.real2 <- kmeans(sreal.data.2, k.real2, nstart = 25)
+
+# library(ggplot2)
+# library(factoextra)
+fviz_cluster(km.real2, data = sreal.data.2,
+             palette = colours[1:k.real2],
+             ellipse.type = "euclid", # Concentration ellipse
+             star.plot = TRUE, # Add segments from centroids to items
+             repel = TRUE, # Avoid label overplotting (slow)
+             ggtheme = theme_minimal())
+```
+
+
+## SYNTHETIC DATA
+
+### K decision
+```{r}
+kopt.synt2 <- NbClust(data = synt.data.2, diss = NULL, distance = "euclidean", method = "kmeans", index = "all", alphaBeale = 0.1)
+
+k.synt2 <- as.numeric(names(table(as.vector(kopt.synt2$Best.nc[1,])))[which.max(table(as.vector(kopt.synt2$Best.nc[1,])))])
+```
+
+
+### K-means
+```{r}
+ssynt.data.2 <- scale(synt.data.2)
+head(ssynt.data.2, n = 3)
+
+set.seed(my.seed)
+km.synt2 <- kmeans(ssynt.data.2, k.synt2, nstart = 25)
+
+fviz_cluster(km.synt2, data = ssynt.data.2,
+             palette = colours[1:k.synt2],
+             ellipse.type = "euclid", # Concentration ellipse
+             star.plot = TRUE, # Add segments from centroids to items
+             repel = TRUE, # Avoid label overplotting (slow)
+             ggtheme = theme_minimal())
+```
+
+## SPECKS
+```{r}
+# Calculem el SPECKS amb el paquet synthpop
+utilityGen2 <- utility.gen(sds.default2, real.data.2, method = "cart", print.flag = FALSE)
+(specks2 <- utilityGen2$SPECKS)
+```
+
+```{r}
+combined_data2 <- rbind(
+  cbind(real.data.2, label = 0), # Original data (label = 0)
+  cbind(synt.data.2, label = 1) # Synthetic data (label = 1)
+)
+
+B <- 10000
+n1 <- nrow(real.data.2)
+n2 <- nrow(synt.data.2)
+N <- n1+n2
+specks.boot2 <- numeric(B) #vactor buit on guardo les 2000 estimacions de quocient
+set.seed(1234)
+for(b in 1:B){
+  boot.data2 <- combined_data2
+  i <- sample(1:N, size=n1, replace=T)
+  boot.data2$label <- combined_data2[i,3]
+  
+  cart_model2 <- rpart(
+  formula = label ~ .,             # label com a resposta, la resta com a predictors
+  data = boot.data2,
+  method = "class",                # arbre de classificació
+  control = rpart.control(mincriterion = 0, 
+            minbucket = 5, 
+            cp = 1e-3))
+  
+  pred_prob2 <- predict(cart_model2, type = "prob")[, 2]
+  
+  label_vector2 <- boot.data2$label
+  
+  p_hat_real2  <- pred_prob2[label_vector2 == 0]
+  p_hat_synth2 <- pred_prob2[label_vector2 == 1]
+
+  ecdf_real2  <- ecdf(p_hat_real2)
+  ecdf_synth2 <- ecdf(p_hat_synth2)
+
+  all_scores2 <- sort(unique(c(p_hat_real2, p_hat_synth2)))
+
+  specks.boot2[b] <- max(abs(ecdf_real2(all_scores2) - ecdf_synth2(all_scores2)))
+}
+
+pConf <- c(0.025, 0.975)
+tBoot.2 <- quantile(abs(specks.boot2),probs= pConf)
+hist(specks.boot2, breaks=50, freq=F, xlim=c(0.3,0.7))
+abline(v=specks2, col="red", lwd = 2, lty = 2)
+abline(v = tBoot.2[1], col = "blue", lwd = 2, lty = 2)
+abline(v = tBoot.2[2], col = "blue", lwd = 2, lty = 2)
+```
+
+
+
+
+## Metriques clustering
+```{r}
+# Nombre de cluster
+clust.num2 <- max(k.real2, k.synt2)/min(k.real2, k.synt2)
+
+# Nombre d'observacions dins de clúster - Chi-Quadrat
+clust.size2 <- rbind(km.real2$size, km.synt2$size)
+rownames(clust.size2) <- c("Real", "Synthetic")
+colnames(clust.size2) <- c("Cluster1", "Cluster2")
+
+chisq2 <- chisq.test(clust.size2)$p.value
+
+# Índex de Gini
+gini.real2 <- Gini(km.real2$size)
+gini.synt2 <- Gini(km.synt2$size)
+# (gini2 <- abs(gini.real2 - gini.synt2))
+gini2 <- max(gini.real2, gini.synt2)/min(gini.real2, gini.synt2)
+
+# Coeficient de silhouette
+# library(cluster)
+sil.real2 <- mean(silhouette(km.real2$cluster, dist(real.data.2))[,3])
+sil.synt2 <- mean(silhouette(km.synt2$cluster, dist(synt.data.2))[,3])
+# (sil2 <- abs(sil.real2 - sil.synt2))
+sil2 <- max(sil.real2, sil.synt2)/min(sil.real2, sil.synt2)
+```
+
+## Generalitzant
+```{r}
+load("Phase0_v1.RData")
+```
+
+```{r}
+set.seed(my.seed)
+m <- 1000
+
+sds.default2 <- syn(real.data.2, method = "cart", seed = my.seed, m = m, print.flag = FALSE)
+synt.data.2 <- sds.default2$syn
+# synt.data.2[1]
+
+k.synt2 <- numeric(m) #vector nombre de k
+ssynt.data.2 <- list(m) #dataframe escalat
+km.synt2 <- list(m)
+
+for (i in 1:m){
+  kopt.synt2 <- suppressMessages(NbClust(data = synt.data.2[[i]], diss = NULL, distance = "euclidean", method = "kmeans", index = "all", alphaBeale = 0.1))
+  k.synt2[i] <- as.numeric(names(table(as.vector(kopt.synt2$Best.nc[1,])))[which.max(table(as.vector(kopt.synt2$Best.nc[1,])))])
+  
+  ssynt.data.2[[i]] <- scale(synt.data.2[[i]])
+  # head(ssynt.data.2, n = 3)
+
+  set.seed(my.seed)
+  km.synt2[[i]] <- kmeans(ssynt.data.2[[i]], k.synt2[i], nstart = 25)
+}
+
+```
+
+### SPECKS
+```{r}
+utilityGen2 <- utility.gen(sds.default2, real.data.2, method = "cart", print.flag = FALSE)
+specks2 <- utilityGen2$SPECKS
+```
+
+
+### Metriques clustering
+```{r}
+clust.num2 <- numeric(m)
+chisq2 <- numeric(m)
+gini2 <- numeric(m)
+sil2 <- numeric(m)
+
+k.real2 <- rep(k.real2,m)
+
+for(i in 1:m){
+  
+  if(k.real2[i] == k.synt2[i]){
+    # Nombre de cluster
+    # clust.num2[i] <- max(k.real2[i], k.synt2[i])/min(k.real2[i], k.synt2[i])
+    clust.num2[i] <- k.real2[i]/k.synt2[i]
+  
+    # Nombre d'observacions dins de clúster - Chi-Quadrat
+    clust.size2 <- rbind(km.real2$size, km.synt2[[i]]$size)
+    chisq2[i] <- chisq.test(clust.size2)$p.value
+    
+    # Índex de Gini
+    gini.real2 <- Gini(km.real2$size)
+    gini.synt2 <- Gini(km.synt2[[i]]$size)
+    gini2 <- abs(gini.real2 - gini.synt2)
+    # gini2[i] <- max(gini.real2, gini.synt2)/min(gini.real2, gini.synt2)
+    
+    # Coeficient de silhouette
+    sil.real2 <- mean(silhouette(km.real2$cluster, dist(real.data.2))[,3])
+    sil.synt2 <- mean(silhouette(km.synt2[[i]]$cluster, dist(synt.data.2[[i]]))[,3])
+    # (sil2 <- abs(sil.real2 - sil.synt2))
+    # sil2[i] <- max(sil.real2, sil.synt2)/min(sil.real2, sil.synt2)
+    sil2[i] <- sil.real2/ sil.synt2
+    
+  } else {
+    # Nombre de cluster
+    # clust.num2[i] <- max(k.real2[i], k.synt2[i])/min(k.real2[i], k.synt2[i])
+    clust.num2[i] <- k.real2[i]/k.synt2[i]
+    
+    # Coeficient de silhouette
+    sil.real2 <- mean(silhouette(km.real2$cluster, dist(real.data.2))[,3])
+    sil.synt2 <- mean(silhouette(km.synt2[[i]]$cluster, dist(synt.data.2[[i]]))[,3])
+    # (sil2 <- abs(sil.real2 - sil.synt2))
+    # sil2[i] <- max(sil.real2, sil.synt2)/min(sil.real2, sil.synt2)
+    sil2[i] <- sil.real2/ sil.synt2
+    
+    chisq2[i] <- NA
+    gini2[i] <- NA
+  }
+}
+```
+
+
+```{r}
+metriques2 <- data.frame(clust.num = clust.num2, sil = sil2)
+metriques2.omit <- data.frame(specks = specks2, chisq = chisq2, gini = gini2)
+
+metriques2.omit <- metriques2.omit[complete.cases(metriques2.omit), ]
+metriques2.omit <- metriques2.omit[!is.infinite(rowSums(metriques2.omit)), ]
+```
+
+### Comparació
+#### Gràfiques
+```{r}
+par(mfrow = c(2, 2))
+scatterplot(specks2, metriques2$clust.num, xlab = "SPECKS", ylab = "NUMBER OF CLUSTER", pch = 19)
+scatterplot(specks2, metriques2$sil, xlab = "SPECKS", ylab = "SILHOUETTE", pch = 19)
+scatterplot(metriques2.omit$specks, metriques2.omit$chisq, xlab = "SPECKS", ylab = "CHISQ", pch = 19)
+scatterplot(metriques2.omit$specks, metriques2.omit$gini, xlab = "SPECKS", ylab = "GINI", pch = 19)
+```
+
+```{r}
+save.image(file = "Phase0_v1.RData")
+```
+
+
+#### Numèriques
+```{r}
+cor(specks2, metriques2$clust.num, method = "spearman")
+cor(specks2, metriques2$clust.num, method = "kendall")
+
+cor(specks2, metriques2$sil, method = "spearman")
+cor(specks2, metriques2$sil, method = "kendall")
+
+cor(metriques2.omit$specks, metriques2.omit$chisq, method = "spearman")
+cor(metriques2.omit$specks, metriques2.omit$chisq, method = "kendall")
+
+cor(metriques2.omit$specks, metriques2.omit$gini, method = "spearman")
+cor(metriques2.omit$specks, metriques2.omit$gini, method = "kendall")
+
+hist(specks2)
+```
+
