@@ -1,0 +1,376 @@
+---
+title: "Phase0_2"
+author: "Xinnuo Chen"
+date: "2025-04-24"
+output: html_document
+---
+Dataset de 8 variables normals, 500 observacions i amb patrons de dos cluster.
+
+# Libraries
+```{r}
+# install.packages("synthpop")
+library(synthpop)
+
+# install.packages("NbClust")
+library(NbClust)
+
+library(ggplot2)
+library(factoextra)
+
+# install.packages("DescTools") #index de Gini
+library(DescTools)
+
+library(cluster) #index de Silhouette
+
+# install.packages("label.switching")
+library(label.switching)
+
+library(car) #scatterplot
+
+library(tidyverse)
+
+library(clue) #label switching
+
+library(caret) #calcular accuracy
+
+library(rpart)
+
+library(dgof)
+
+library(dplyr)
+library(tibble)
+
+# install.packages("paletteer")
+# install.packages("scales")
+library(paletteer)
+library(scales)
+colour.patteer <- paletteer_c("ggthemes::Classic Orange-Blue", 80)
+colours <- colour.patteer[c(23, 78, 43)]
+
+library(tidyr)     # pivot_longer
+library(mvtnorm)
+```
+
+# Functions
+```{r}
+# Real data generation
+normal.data.generation <- function(n, mu, sigma = NULL, seed = NULL)
+{
+  if(!is.null(seed)) set.seed(seed)
+  
+  # Si no passes cap matriu, fem una de correlacions AR(1) (rho = 0.4)
+  if(is.null(sigma)){
+    rho   <- 0.4
+    idx   <- 0:7
+    sigma <- outer(idx, idx, function(i, j) rho^abs(i - j))  # AR(1)
+  }
+  
+  stopifnot(length(mu) == 8,
+            all(dim(sigma) == c(8, 8)),
+            isSymmetric(sigma),
+            all(eigen(sigma, only.values = TRUE)$values > 0))  # ha de ser definida positiva
+  
+  mat <- rmvnorm(n, mean = mu, sigma = sigma)
+  as.data.frame(mat)
+}
+
+
+synt.data.generation <- function(real.data, cp.values=NULL, minbucket.values=NULL, m){
+  if(!is.null(cp.values) & !is.null(minbucket.values)){
+    specks.value <- data.frame(cp = numeric(0), minbucket = numeric(0), SPECKS = numeric(0))
+    # sds.default <- list() # list on guardo els objectes syn
+    synt.data <- list() # list on guardo totes les dades sintetiques generades
+    
+    for(i in 1:length(cp.values)){
+      for(j in 1:length(minbucket.values)){
+        syn.obj <- syn(real.data,  # Generació amb CART
+                       method = rep("cart", ncol(real.data)),
+                       cart.control = list(cp = cp.values[i], minbucket = minbucket.values[j]),
+                       m = m,
+                       print.flag = FALSE)
+       # syn.obj <- as.list(syn.obj)
+       # sds.default <- c(sds.default, syn.obj)
+        synt.data <- c(synt.data, syn.obj$syn)
+        
+        for(k in 1:m){
+          names(synt.data[[k]]) <- names(real.data)
+          
+          data <- rbind(
+            cbind(real.data, label = 0),
+            cbind(synt.data[[k]], label = 1)
+          )
+          
+          # Calcular SPECKS para la combinación actual de cp y minbucket
+          specks.val <- specks(data = data)$Specks
+          specks.value <- rbind(specks.value, data.frame(minbucket = minbucket.values[j], cp = cp.values[i], SPECKS = specks.val))
+        }
+      }
+    }  
+    results <- list("Specks" = specks.value, "Syn data" = synt.data)
+    return(results)
+  } else {
+    syn.obj <- syn(real.data,  # Generació amb CART
+                       method = rep("cart", ncol(real.data)),
+                       m = m,
+                       print.flag = FALSE)
+    synt.data <- syn.obj$syn
+    specks.val <- numeric()
+    for(k in 1:m){
+          names(synt.data[[k]]) <- names(real.data)
+          
+          data <- rbind(
+            cbind(real.data, label = 0),
+            cbind(synt.data[[k]], label = 1)
+          )
+          
+          # Calcular SPECKS para la combinación actual de cp y minbucket
+          specks.val <- c(specks.val, specks(data = data)$Specks)
+          specks.value <- data.frame(SPECKS = specks.val)
+    }
+    results <- list("Specks" = specks.value, "Syn data" = synt.data)
+    return(results)
+  }
+}
+
+
+# K decision & clustering 
+k.decision <- function(data, k.real = 0, synthetic = TRUE){
+  if(synthetic == FALSE){
+    kopt.obj <- NbClust(data = data, diss = NULL, distance = "euclidean", method = "kmeans", index = "all", alphaBeale = 0.1)
+    kopt <- as.numeric(names(table(as.vector(kopt.obj$Best.nc[1,])))[which.max(table(as.vector(kopt.obj$Best.nc[1,])))])
+    sdata <- scale(data)
+    clust <- kmeans(sdata, kopt, nstart = 25)
+    
+    clustering.result <- list("K optim" = kopt, "Clustering" = clust)
+    return(clustering.result)
+  } else {
+    kopt.obj <- NbClust(data = data, diss = NULL, distance = "euclidean", method = "kmeans", index = "all", alphaBeale = 0.1)
+    kopt <- as.numeric(names(table(as.vector(kopt.obj$Best.nc[1,])))[which.max(table(as.vector(kopt.obj$Best.nc[1,])))])
+    
+    if(kopt == k.real){
+      sdata <- scale(data)
+      clust <- kmeans(sdata, kopt, nstart = 25) #resultado de clustering
+      
+      clustering.result <- list("K optim" = kopt, "Clustering" = clust)
+      return(clustering.result)
+    }
+  }
+}
+
+
+# SPECKS CALCULATION
+specks <- function(data, sample=FALSE, minbucket=5, cp = 1e-3){   #### With pvalue
+  
+  if(sample==TRUE){
+    data[,3] <- sample(data[,3])
+  }
+  
+  cart_model <- rpart(
+    formula = label ~ .,             # label com a resposta, la resta com a predictors
+    data = data,
+    method = "class",                # arbre de classificació
+    control = rpart.control(mincriterion = 0, 
+                            minbucket = minbucket, 
+                            cp = cp))
+  
+  pred.prob <- predict(cart_model, type = "prob")[, 2]
+  
+  label.vector <- data$label
+  
+  prop.score.real  <- pred.prob[label.vector == 0]
+  prop.score.synt  <- pred.prob[label.vector == 1]
+  
+  ecdf.real  <- ecdf(prop.score.real)
+  ecdf.synth <- ecdf(prop.score.synt)
+  
+  all.scores <- sort(unique(c(prop.score.real, prop.score.synt)))
+  
+  specks.value <- max(abs(ecdf.real(all.scores) - ecdf.synth(all.scores)))
+  p.value <- suppressWarnings(ks.test(prop.score.real, prop.score.synt)$p)
+  
+  return(data.frame(
+    "Specks" = specks.value, 
+    "P-value" = p.value,
+    "Propensity score real" = prop.score.real,
+    "Propensity score synthetic" = prop.score.synt))
+}
+
+# Label switching function
+label.switching <- function(km.real, km.synt){
+  if(!is.null(km.synt)){
+      centroids <- rbind(km.real$centers, km.synt$centers)
+      dist.global <- as.matrix(dist(centroids, method = "euclidean"))
+      n.real <- nrow(km.real$centers) #numero de cluster en real
+      n.synt <- nrow(km.synt$centers) #numero de cluster en synt
+      dist <- dist.global[1:n.real, (n.real + 1) : (n.real + n.synt)]
+      label.ass <- solve_LSAP(dist, maximum = FALSE) 
+      
+      # Reetiquetació els clústers sintètics
+      km.synt$recluster <- km.real$cluster # nova variable
+      
+      for (i in 1:length(label.ass)) {
+        km.synt$recluster[km.synt$cluster == label.ass[i]] <- i
+      }
+  }
+  return(km.synt)
+}
+
+# Metrics function
+cluster.metrics <- function(km.real, km.synt, k.real, k.synt, real.data, synt.data){
+    # Nombre de cluster
+    clust.num <- k.synt/k.real
+    
+    # Nombre d'observacions dins de clúster -> accuracy
+    conf.mat <- confusionMatrix(data = as.factor(km.synt$recluster), reference = as.factor(km.real$cluster))
+    accuracy <- conf.mat$overall["Accuracy"]
+    
+    # Distribució d'observacions en clúster -> Índex de Gini
+    gini.real <- Gini(km.real$size)
+    gini.synt <- Gini(km.synt$size)
+    #gini <- (gini.synt)/(gini.real + 1e-6)
+    gini <- abs(gini.synt - gini.real)
+    
+    # Distancia d'observacions a cluster -> Coeficient de silhouette (entre -1 i 1)
+    sil.real <- mean(silhouette(km.real$cluster, dist(real.data))[,3])
+    sil.synt <- mean(silhouette(km.synt$recluster, dist(synt.data))[,3])
+    sil <- sil.synt/sil.real
+    
+    # Distancia mitjana entre centroides
+    vars <- names(real.data)
+    lreal.data <- real.data
+    lreal.data$label <- as.factor(km.real$cluster)
+    lsynt.data <- synt.data
+    lsynt.data$label <- as.factor(km.synt$recluster)
+
+    real.centroid <- aggregate(. ~ label,
+                                data = lreal.data[, c(vars, "label")],
+                                FUN = base::mean)
+    synt.centroid <- aggregate(. ~ label,
+                                data = lsynt.data[, c(vars, "label")],
+                                FUN = base::mean)
+    real.centroid <- real.centroid[order(real.centroid$label), ]
+    synt.centroid <- synt.centroid[order(synt.centroid$label), ]
+    
+    mat.real <- as.matrix(real.centroid[, vars])
+    mat.synt <- as.matrix(synt.centroid[, vars])
+    distances <- sqrt(rowSums((mat.real - mat.synt)^2))
+    mean.distance <- mean(distances)
+
+    # Variancia mitjana entre centroides
+    real.var <- aggregate(. ~ label,
+                                data = lreal.data[, c(vars, "label")],
+                                FUN = var)
+    synt.var <- aggregate(. ~ label,
+                                     data = lsynt.data[, c(vars, "label")],
+                                     FUN = var)
+    real.var <- real.var[order(real.var$label), ]
+    synt.var <- synt.var[order(synt.var$label), ]
+    
+    mat.real.var <- as.matrix(real.var[, vars])
+    mat.synt.var <- as.matrix(synt.var[, vars])
+    
+    dif.var <- abs(mat.real.var - mat.synt.var)
+    mean.var <- mean(dif.var)
+    
+  result <- list("Clus.num" = clust.num, "Accuracy" = accuracy, "Gini" = gini, "Sil" = sil, "Mean distance" = mean.distance, "Mean variance" = mean.var)
+  return(result)
+}
+
+plot.metrics <- function(df, specks.col = "SPECKS") {
+  num_cols <- sapply(df, is.numeric)
+  num_cols[specks.col] <- FALSE
+
+  long.df <- pivot_longer(df,
+                          cols      = names(num_cols)[num_cols],
+                          names_to  = "Metric",
+                          values_to = "Value")
+
+  ggplot(long.df,
+         aes(x = .data[[specks.col]], y = Value)) +   # tidy eval
+    geom_point(alpha = 0.6) +
+    geom_smooth(method = "lm", se = FALSE, colour = "red", formula = y ~ x) +
+    facet_wrap(~ Metric, scales = "free_y") +
+    labs(x = specks.col, y = NULL,
+         title = "Relació de cada mètrica amb SPECKS") +
+    theme_minimal()
+}
+```
+
+# Real data generation
+```{r}
+my.seed <- 12345
+set.seed(my.seed)
+mu1 <- c(160, 50, 20, 7, 6, 8, 5, 8)
+mu2 <- c(180, 65, 24, 5, 7, 8, 9, 6)
+
+df1 <- normal.data.generation(n=250, mu=mu1)
+df2 <- normal.data.generation(n=250, mu=mu2)
+
+real.data <- rbind(df1, df2)
+head(real.data)
+```
+
+# Generació de dades sintètiques
+```{r}
+synt.data.obj <- synt.data.generation(real.data, cp.values=NULL, minbucket.values=NULL, 1000)
+specksa <- synt.data.obj$Specks$SPECKS #vector amb el specks de tots els datasets sintetics generats
+synt.data <- synt.data.obj$`Syn data`
+```
+
+# K optim i Clustering i Label switching
+```{r}
+k.real <- k.decision(real.data, synthetic = FALSE)$`K optim` #k optim del dataset real
+km.real <- k.decision(real.data, synthetic = FALSE)$Clustering 
+
+result <- lapply(synt.data, function(df){
+            k.decision(df, k.real = k.real, synthetic = TRUE)
+          })
+k.synt <- as.vector(lapply(result, function(res) res[["K optim"]])) #k optim del dataset sintetic
+km.synt <- lapply(result, function(res) res[["Clustering"]])
+
+ls.km.synt <- lapply(km.synt, function(ls) label.switching(km.real, ls))
+```
+
+# Metrics
+```{r}
+save(km.real, km.synt, ls.km.synt, k.real, k.synt, real.data, synt.data, specksa, file = "Objetctv0_2.RData")
+load("Objetctv0_2.RData")
+
+clust.num <- numeric()
+accuracy <- numeric()
+gini <- numeric()
+sil <- numeric()
+mean.distance <- numeric()
+mean.var <- numeric()
+for(i in 1:length(ls.km.synt)){
+  if(length(k.real) == 1 &&
+     !is.null(k.synt[[i]]) &&
+     length(k.synt[[i]]) == 1)
+  {
+    if(k.real == k.synt[[i]]){
+      result <- cluster.metrics(km.real, km.synt = ls.km.synt[[i]], k.real=k.real, k.synt = k.synt[[i]], real.data=real.data, synt.data = synt.data[[i]])
+      clust.num <- c(clust.num, result$Clus.num)
+      accuracy <- c(accuracy, result$Accuracy)
+      gini <- c(gini, result$Gini)
+      sil <- c(sil, result$Sil)
+      mean.distance <- c(mean.distance, result$`Mean distance`)
+      mean.var <- c(mean.var, result$`Mean variance`)
+    }
+  }
+}
+
+metrics <- data.frame("Clus.num" = clust.num, "Accuracy" = accuracy, "Gini" = gini, "Sil" = sil, "Mean distance" = mean.distance, "Mean variance" = mean.var)
+
+which.null <- vapply(k.synt, is.null, logical(1))
+specksa.2 <- specksa[!which.null]
+
+metrics$SPECKS <- specksa.2
+head(metrics)
+```
+
+# Graphics
+```{r}
+plot.metrics(metrics)
+```
+
+Gini: mes proper a 0, mides mes igualats -> rati de gini -> s'espera proper a 0. 
