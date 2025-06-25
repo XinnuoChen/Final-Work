@@ -1,0 +1,708 @@
+---
+title: "Purpose2"
+author: "Xinnuo Chen"
+date: "2025-04-25"
+output: html_document
+---
+Dataset de 8 variables normals, 800 observacions (més casos), i amb cluster menys diferencials.
+Els propensity scores utilitzats per dur el càlcul del SPECKS s'obtenen mitjançant un model logit (anteriorment CART). -> Resultats més bons. 
+
+# Libraries
+```{r}
+library(synthpop)
+library(NbClust)
+library(ggplot2)
+library(factoextra)
+library(DescTools)
+library(cluster)
+library(car)
+library(tidyverse)
+library(clue) #label switching
+library(rpart)
+library(dgof)
+library(dplyr)
+library(tibble)
+library(paletteer)
+library(scales)
+colour.patteer <- paletteer_c("ggthemes::Classic Orange-Blue", 80)
+colours <- colour.patteer[c(23, 78, 43)]
+
+library(tidyr)
+library(mvtnorm)
+```
+
+# Functions
+```{r}
+# Real data generation
+centroid.generation <- function(k = k, p = p, separation = separation) {
+  centroids <- matrix(NA, nrow = k, ncol = p)
+  centroids[1, ] <- rep(0, p)                 # first centroid at the origin 
+  for (i in 2:k) {
+    tries <- 0
+    repeat {
+      vector <- rnorm(p)                      # a random point
+      vector <- vector / sqrt(sum(vector^2))  # normalize the point vector
+      vector <- vector * separation           # distance of number of separations from the origin
+      
+      dists <- sqrt(rowSums((centroids[1:(i - 1), , drop = FALSE] -  # distances from the new point to each of the fixed points
+                             matrix(vector, nrow = i - 1, ncol = p, byrow = TRUE))^2))
+      if (all(dists >= separation)) {         # accept the new point if this complete the separation
+        centroids[i, ] <- vector
+        break
+      }
+      tries <- tries + 1                      # avoid infinite loop
+      if (tries > 1000) stop("It has not been possible to generate sufficiently separate centroids.")
+    }
+  }
+  return(centroids)
+}
+
+data.generation <- function(N, p, rho, separation, k){
+  # position of the centroid
+  centroids <- centroid.generation(k = k, p = p, separation = separation)
+  
+  # correlation matrix
+  R <- matrix(rho, nrow = p, ncol = p)
+  diag(R) <- 1
+  
+  # covariance matrix
+  sd <- rep(1, p)
+  D <- diag(sd)
+  Sigma <- D %*% R %*% D  #
+  
+  # data generation for each cluster
+  n <- round(N/k, digits = 0)
+  clusters <- lapply(1:k, function(i) {
+    rmvnorm(n,
+            mean  = centroids[i, ],
+            sigma = Sigma)
+  })
+  data <- do.call(rbind, clusters)
+  data <- data.frame(data, group = factor(rep(1:k, each = n)))
+  
+  # graphic representation
+  Graphic <- ggplot(data, aes(x = X1, y = X2, color = group)) +
+                geom_point(size = 2) +
+                scale_color_brewer(palette = "Set1") +
+                labs(
+                  title = "First dimention representation",
+                  color = "Cluster"
+                ) +
+                theme_minimal(base_size = 14)
+  result <- list("Data" = data[,-ncol(data)], "Graphic"=Graphic, "Clusters" = clusters)
+}
+
+
+# Synthetic data generation
+synt.data.generation <- function(real.data, m, methods){
+    syn.obj <- syn(real.data,
+                       method = rep(methods, ncol(real.data)),
+                       m = m,
+                       print.flag = FALSE, 
+                       proper = TRUE)
+    synt.data <- syn.obj$syn
+    specks.val <- numeric()
+    if(m==1){
+      names(synt.data) <- names(real.data)
+      data <- rbind(
+            cbind(real.data, label = 0),
+            cbind(synt.data, label = 1)
+          )
+      specks.val <- c(specks.val, specks.correct(data = data)$Specks)
+      specks.value <- data.frame(SPECKS = specks.val)
+    } else {
+      for(k in 1:m){
+          names(synt.data[[k]]) <- names(real.data)
+          
+          data <- rbind(
+            cbind(real.data, label = 0),
+            cbind(synt.data[[k]], label = 1)
+          )
+          
+          specks.val <- c(specks.val, specks.correct(data = data)$Specks)
+          specks.value <- data.frame(SPECKS = specks.val)
+      }
+    }
+    results <- list("Specks" = specks.value, "Syn data" = synt.data)
+    return(results)
+}
+
+
+# K decision & clustering 
+k.decision <- function(data, k.real = 0, synthetic = TRUE){ 
+  if(synthetic == FALSE){
+    sil <- fviz_nbclust(data, kmeans, method = "silhouette")$data
+    kopt <- as.numeric(sil$clusters[which.max(sil$y)])
+    
+    sdata <- scale(data)
+    clust <- kmeans(sdata, kopt, nstart = 25, iter.max = 100)
+    
+    clustering.result <- list("K optim" = kopt, "Clustering" = clust)
+    return(clustering.result)
+  } else {
+    sil <- fviz_nbclust(data, kmeans, method = "silhouette")$data
+    kopt <- as.numeric(sil$clusters[which.max(sil$y)])
+    
+    if(kopt == k.real){
+      sdata <- scale(data)
+      clust <- kmeans(sdata, kopt, nstart = 25, iter.max = 100) #resultado de clustering
+      
+      clustering.result <- list("K optim" = kopt, "Clustering" = clust)
+      return(clustering.result)
+    }
+  }
+}
+
+# SPECKS CALCULATION
+specks.correct <- function(data, sample=FALSE){   #### With pvalue
+  if(sample==TRUE){
+    data[,3] <- sample(data[,3])
+  }
+  
+  N <- nrow(data)
+  idx <- sample(1:N, round(N*0.3, digits=0))
+  
+  data.train <- data[-idx,]
+  data.test <- data[idx,]
+  
+  logit_model <- glm(label ~ ., data = data.train, family = "binomial")
+  
+  pred.prob <- predict(logit_model, newdata = data.test, type = "response")
+  
+  label.vector <- data.test$label
+  
+  prop.score.real  <- pred.prob[label.vector == 0]
+  prop.score.synt  <- pred.prob[label.vector == 1]
+  
+  ecdf.real  <- ecdf(prop.score.real)
+  ecdf.synth <- ecdf(prop.score.synt)
+  
+  all.scores <- sort(unique(c(prop.score.real, prop.score.synt)))
+  
+  specks.value <- max(abs(ecdf.real(all.scores) - ecdf.synth(all.scores)))
+  p.value <- suppressWarnings(ks.test(prop.score.real, prop.score.synt)$p)
+  
+  return(data.frame(
+    "Specks" = specks.value, 
+    "P-value" = p.value))
+}
+
+# Label switching function
+label.switching <- function(km.real, km.synt){ # Label switching function
+  if(!is.null(km.synt)){
+      centroids <- rbind(km.real$centers, km.synt$centers)
+      dist.global <- as.matrix(dist(centroids, method = "euclidean"))
+      n.real <- nrow(km.real$centers) #numero de cluster en real
+      n.synt <- nrow(km.synt$centers) #numero de cluster en synt
+      dist <- dist.global[1:n.real, (n.real + 1) : (n.real + n.synt)]
+      label.ass <- solve_LSAP(dist, maximum = FALSE) 
+      
+      # Reetiquetació els clústers sintètics
+      km.synt$recluster <- km.real$cluster # nova variable
+      
+      for (i in 1:length(label.ass)) {
+        km.synt$recluster[km.synt$cluster == label.ass[i]] <- i
+      }
+  }
+  return(km.synt)
+}
+
+# Metrics function
+cluster.metrics <- function(km.real, km.synt, k.real, k.synt, real.data, synt.data){
+    # Nombre de cluster
+    clust.num <- k.synt/k.real
+    
+    # Nombre d'observacions dins de clúster -> accuracy
+    conf.mat <- confusionMatrix(data = as.factor(km.synt$recluster), reference = as.factor(km.real$cluster))
+    accuracy <- conf.mat$overall["Accuracy"]
+    
+    # Distribució d'observacions en clúster -> Índex de Gini
+    gini.real <- Gini(km.real$size)
+    gini.synt <- Gini(km.synt$size)
+    #gini <- (gini.synt)/(gini.real + 1e-6)
+    gini <- abs(gini.synt - gini.real)
+    
+    # Distancia d'observacions a cluster -> Coeficient de silhouette (entre -1 i 1)
+    sil.real <- mean(silhouette(km.real$cluster, dist(real.data))[,3])
+    sil.synt <- mean(silhouette(km.synt$recluster, dist(synt.data))[,3])
+    sil <- sil.synt/sil.real
+    
+    # Distancia mitjana entre centroides
+    vars <- names(real.data)
+    lreal.data <- real.data
+    lreal.data$label <- as.factor(km.real$cluster)
+    lsynt.data <- synt.data
+    lsynt.data$label <- as.factor(km.synt$recluster)
+
+    real.centroid <- aggregate(. ~ label,
+                                data = lreal.data[, c(vars, "label")],
+                                FUN = base::mean)
+    synt.centroid <- aggregate(. ~ label,
+                                data = lsynt.data[, c(vars, "label")],
+                                FUN = base::mean)
+    real.centroid <- real.centroid[order(real.centroid$label), ]
+    synt.centroid <- synt.centroid[order(synt.centroid$label), ]
+    
+    mat.real <- as.matrix(real.centroid[, vars])
+    mat.synt <- as.matrix(synt.centroid[, vars])
+    distances <- sqrt(rowSums((mat.real - mat.synt)^2))
+    mean.distance <- mean(distances)
+
+    # Variancia mitjana entre centroides
+    real.var <- aggregate(. ~ label,
+                                data = lreal.data[, c(vars, "label")],
+                                FUN = var)
+    synt.var <- aggregate(. ~ label,
+                                     data = lsynt.data[, c(vars, "label")],
+                                     FUN = var)
+    real.var <- real.var[order(real.var$label), ]
+    synt.var <- synt.var[order(synt.var$label), ]
+    
+    mat.real.var <- as.matrix(real.var[, vars])
+    mat.synt.var <- as.matrix(synt.var[, vars])
+    
+    dif.var <- abs(mat.real.var - mat.synt.var)
+    mean.var <- mean(dif.var)
+    
+  result <- list("Clus.num" = clust.num, "Accuracy" = accuracy, "Gini" = gini, "Sil" = sil, "Mean distance" = mean.distance, "Mean variance" = mean.var)
+  return(result)
+}
+
+plot.metrics <- function(df, specks.col = "SPECKS") {
+  num_cols <- sapply(df, is.numeric)
+  num_cols[specks.col] <- FALSE
+
+  long.df <- pivot_longer(df,
+                          cols      = names(num_cols)[num_cols],
+                          names_to  = "Metric",
+                          values_to = "Value")
+
+  ggplot(long.df,
+         aes(x = .data[[specks.col]], y = Value)) +   # tidy eval
+    geom_point(alpha = 0.6) +
+    geom_smooth(method = "lm", se = FALSE, colour = "red", formula = y ~ x) +
+    facet_wrap(~ Metric, scales = "free_y") +
+    labs(x = specks.col, y = NULL,
+         title = "Relació de cada mètrica amb SPECKS") +
+    theme_minimal()
+}
+```
+
+# CASE 1: IDEAL CASE
+-   Separation = 2sigma
+-   Clust.num = 2
+-   Variables = 8
+
+## Real data generation
+```{r}
+my.seed <- 12345
+set.seed(my.seed)
+
+real.data <- data.generation(1000, p = 8, rho = 0, separation = 2, k = 2)$Data
+head(real.data)
+
+k.real <- k.decision(real.data, synthetic = FALSE)$`K optim`
+km.real <- k.decision(real.data, synthetic = FALSE)$Clustering
+
+```
+
+## Synthetic data generation
+```{r}
+total.m <- 1000
+count <- 0
+m <- 0
+synt.data <- list()
+km.synt <- list()
+k.synt <- numeric()
+speck <- numeric()
+while(m < total.m){
+  set.seed(m + count)
+  count <- count + 1
+  syn   <- synt.data.generation(real.data, m = 1, methods = "cart")
+  clust <- k.decision(syn$`Syn data`, k.real = k.real, synthetic = TRUE)
+  if(!is.null(clust)){
+    m <- m + 1
+    synt.data[[m]] <- syn$`Syn data`
+    km.synt[[m]] <- clust$Clustering
+    k.synt[m] <- clust$`K optim`
+    speck[m] <- syn$Specks$SPECKS
+  }
+}
+```
+
+
+## Metrics
+```{r}
+vars <- names(real.data)
+gini.real <- Gini(km.real$size)
+sil.real <- mean(silhouette(km.real$cluster, dist(real.data))[,3])
+lreal.data <- real.data
+lreal.data$label <- as.factor(km.real$cluster)
+
+ls.km.synt <- lapply(km.synt, label.switching, km.real) #label switching
+
+  ## Gini
+  gini.syn <- sapply(km.synt, function(km) Gini(km$size))
+  
+  sil.synt <- numeric(m)      
+  mean.distance <- numeric(m)
+  mean.var <- numeric(m)
+  for (i in seq_along(km.synt)){
+    lsynt.data <- synt.data[[i]]
+    lsynt.data$label <- factor(ls.km.synt[[i]]$recluster)
+    
+    ## Silhouette
+    sil.synt[i] <- mean(silhouette(km.synt[[i]]$cluster, dist(synt.data[[i]]))[,3])
+    
+    ## Average distance between centroids
+    real.centroid <- aggregate(. ~ label,
+                                data = lreal.data[, c(vars, "label")],
+                                FUN = base::mean)
+    synt.centroid <- aggregate(. ~ label,
+                                data = lsynt.data[, c(vars, "label")],
+                                FUN = base::mean)
+    real.centroid <- real.centroid[order(real.centroid$label), ]
+    synt.centroid <- synt.centroid[order(synt.centroid$label), ]
+        
+    mat.real <- as.matrix(real.centroid[, vars])
+    mat.synt <- as.matrix(synt.centroid[, vars])
+    distances <- sqrt(rowSums((mat.real - mat.synt)^2))
+    mean.distance[i] <- mean(distances)
+    
+    ## Mean variance between centroids
+    real.var <- aggregate(. ~ label,
+                          data = lreal.data[, c(vars, "label")],
+                          FUN = var)
+    synt.var <- aggregate(. ~ label,
+                          data = lsynt.data[, c(vars, "label")],
+                          FUN = var)
+    real.var <- real.var[order(real.var$label), ]
+    synt.var <- synt.var[order(synt.var$label), ]
+    
+    mat.real.var <- as.matrix(real.var[, vars])
+    mat.synt.var <- as.matrix(synt.var[, vars])
+    
+    dif.var <- abs(mat.real.var - mat.synt.var)
+    mean.var[i] <- mean(dif.var)
+  }
+
+result_case1 <- data.frame(Specks = speck,
+                           Gini.real = rep(gini.real, m),
+                           Gini.synt = gini.syn,
+                           Sil.real = rep(sil.real, m),
+                           Sil.synt = sil.synt,
+                           Mean.distance = mean.distance,
+                           Mean.var = mean.var)
+result_case1 <- result_case1 %>%
+  mutate(Diff.gini = Gini.real - Gini.synt) %>%
+  mutate(Diff.sil = Sil.real - Sil.synt)
+```
+
+## Graphics
+```{r}
+metrics <- c("Diff.sil", "Diff.gini", "Mean.distance", "Mean.var")
+
+graphics1 <- list(length(metrics))
+
+for (i in seq_along(metrics)) {
+  graphics1[[i]] <- ggplot(result_case1, aes_string(x = "Specks", y = metrics[i])) +
+    geom_point(color = "#3182bd", size = 1) +
+    geom_smooth(method = "lm", se = TRUE, color = "#e6550d") +
+    theme_minimal(base_size = 14)
+}
+print(graphics1)
+
+# library(patchwork)
+layout1 <- (graphics1[[1]] | graphics1[[2]]) /
+          (graphics1[[3]] | graphics1[[4]])
+
+print(layout1)
+
+library(ggplot2)
+ggsave(
+  filename = "specks_metrics_case1.png",
+  plot     = layout1,
+  width    = 12,
+  height   = 6,
+  dpi      = 300
+)
+```
+
+
+# CASE 2: PROBLEMATIC CAS
+-   Separation = 10sigma
+-   Clust.num = 4
+-   Variables = 10
+
+## Real data generation
+```{r}
+my.seed <- 12345
+set.seed(my.seed)
+
+real.data <- data.generation(1000, p = 10, rho = 0, separation = 10, k = 4)$Data
+head(real.data)
+
+k.real <- k.decision(real.data, synthetic = FALSE)$`K optim`
+km.real <- k.decision(real.data, synthetic = FALSE)$Clustering
+
+```
+
+## Synthetic data generation
+```{r}
+total.m <- 1000
+count <- 0
+m <- 0
+synt.data <- list()
+km.synt <- list()
+k.synt <- numeric()
+speck <- numeric()
+while(m < total.m){
+  set.seed(m + count)
+  count <- count + 1
+  syn   <- synt.data.generation(real.data, m = 1, methods = "cart")
+  clust <- k.decision(syn$`Syn data`, k.real = k.real, synthetic = TRUE)
+  if(!is.null(clust)){
+    m <- m + 1
+    synt.data[[m]] <- syn$`Syn data`
+    km.synt[[m]] <- clust$Clustering
+    k.synt[m] <- clust$`K optim`
+    speck[m] <- syn$Specks$SPECKS
+  }
+}
+```
+
+## Metrics
+```{r}
+vars <- names(real.data)
+gini.real <- Gini(km.real$size)
+sil.real <- mean(silhouette(km.real$cluster, dist(real.data))[,3])
+lreal.data <- real.data
+lreal.data$label <- as.factor(km.real$cluster)
+
+ls.km.synt <- lapply(km.synt, label.switching, km.real) #label switching
+
+  ## Gini
+  gini.syn <- sapply(km.synt, function(km) Gini(km$size))
+  
+  sil.synt <- numeric(m)      
+  mean.distance <- numeric(m)
+  mean.var <- numeric(m)
+  for (i in seq_along(km.synt)){
+    lsynt.data <- synt.data[[i]]
+    lsynt.data$label <- factor(ls.km.synt[[i]]$recluster)
+    
+    ## Silhouette
+    sil.synt[i] <- mean(silhouette(km.synt[[i]]$cluster, dist(synt.data[[i]]))[,3])
+    
+    ## Average distance between centroids
+    real.centroid <- aggregate(. ~ label,
+                                data = lreal.data[, c(vars, "label")],
+                                FUN = base::mean)
+    synt.centroid <- aggregate(. ~ label,
+                                data = lsynt.data[, c(vars, "label")],
+                                FUN = base::mean)
+    real.centroid <- real.centroid[order(real.centroid$label), ]
+    synt.centroid <- synt.centroid[order(synt.centroid$label), ]
+        
+    mat.real <- as.matrix(real.centroid[, vars])
+    mat.synt <- as.matrix(synt.centroid[, vars])
+    distances <- sqrt(rowSums((mat.real - mat.synt)^2))
+    mean.distance[i] <- mean(distances)
+    
+    ## Average variance between centroids
+    real.var <- aggregate(. ~ label,
+                          data = lreal.data[, c(vars, "label")],
+                          FUN = var)
+    synt.var <- aggregate(. ~ label,
+                          data = lsynt.data[, c(vars, "label")],
+                          FUN = var)
+    real.var <- real.var[order(real.var$label), ]
+    synt.var <- synt.var[order(synt.var$label), ]
+    
+    mat.real.var <- as.matrix(real.var[, vars])
+    mat.synt.var <- as.matrix(synt.var[, vars])
+    
+    dif.var <- abs(mat.real.var - mat.synt.var)
+    mean.var[i] <- mean(dif.var)
+  }
+
+result_case2 <- data.frame(Specks = speck,
+                           Gini.real = rep(gini.real, m),
+                           Gini.synt = gini.syn,
+                           Sil.real = rep(sil.real, m),
+                           Sil.synt = sil.synt,
+                           Mean.distance = mean.distance,
+                           Mean.var = mean.var)
+result_case2 <- result_case2 %>%
+  mutate(Diff.gini = Gini.real - Gini.synt) %>%
+  mutate(Diff.sil = Sil.real - Sil.synt)
+```
+
+## Graphics
+```{r}
+metrics <- c("Diff.sil", "Diff.gini", "Mean.distance", "Mean.var")
+
+graphics2 <- list(length(metrics))
+
+for (i in seq_along(metrics)) {
+  graphics2[[i]] <- ggplot(result_case2, aes_string(x = "Specks", y = metrics[i])) +
+    geom_point(color = "#3182bd", size = 1) +
+    geom_smooth(method = "lm", se = TRUE, color = "#e6550d") +
+    theme_minimal(base_size = 14)
+}
+print(graphics2)
+
+library(patchwork)
+layout2 <- (graphics2[[1]] | graphics2[[2]]) /
+          (graphics2[[3]] | graphics2[[4]])
+
+print(layout2)
+
+library(ggplot2)
+ggsave(
+  filename = "specks_metrics_case2.png",
+  plot     = layout2,
+  width    = 12,
+  height   = 6,
+  dpi      = 300
+)
+```
+
+# CASE 3: Others
+-   Separation = 2sigma
+-   Clust.num = 4
+-   Variables = 2
+
+## Real data generation
+```{r}
+my.seed <- 12345
+set.seed(my.seed)
+
+real.data <- data.generation(1000, p = 2, rho = 0, separation = 2, k = 4)$Data
+head(real.data)
+
+k.real <- k.decision(real.data, synthetic = FALSE)$`K optim`
+km.real <- k.decision(real.data, synthetic = FALSE)$Clustering
+
+```
+
+## Synthetic data generation
+```{r}
+total.m <- 1000
+count <- 0
+m <- 0
+synt.data <- list()
+km.synt <- list()
+k.synt <- numeric()
+speck <- numeric()
+while(m < total.m){
+  set.seed(m + count)
+  count <- count + 1
+  syn   <- synt.data.generation(real.data, m = 1, methods = "cart")
+  clust <- k.decision(syn$`Syn data`, k.real = k.real, synthetic = TRUE)
+  if(!is.null(clust)){
+    m <- m + 1
+    synt.data[[m]] <- syn$`Syn data`
+    km.synt[[m]] <- clust$Clustering
+    k.synt[m] <- clust$`K optim`
+    speck[m] <- syn$Specks$SPECKS
+  }
+}
+```
+
+## Metrics
+```{r}
+vars <- names(real.data)
+gini.real <- Gini(km.real$size)
+sil.real <- mean(silhouette(km.real$cluster, dist(real.data))[,3])
+lreal.data <- real.data
+lreal.data$label <- as.factor(km.real$cluster)
+
+ls.km.synt <- lapply(km.synt, label.switching, km.real) #label switching
+
+  ## Gini
+  gini.syn <- sapply(km.synt, function(km) Gini(km$size))
+  
+  sil.synt <- numeric(m)      
+  mean.distance <- numeric(m)
+  mean.var <- numeric(m)
+  for (i in seq_along(km.synt)){
+    lsynt.data <- synt.data[[i]]
+    lsynt.data$label <- factor(ls.km.synt[[i]]$recluster)
+    
+    ## Silhouette
+    sil.synt[i] <- mean(silhouette(km.synt[[i]]$cluster, dist(synt.data[[i]]))[,3])
+    
+    ## Average distance between centroids
+    real.centroid <- aggregate(. ~ label,
+                                data = lreal.data[, c(vars, "label")],
+                                FUN = base::mean)
+    synt.centroid <- aggregate(. ~ label,
+                                data = lsynt.data[, c(vars, "label")],
+                                FUN = base::mean)
+    real.centroid <- real.centroid[order(real.centroid$label), ]
+    synt.centroid <- synt.centroid[order(synt.centroid$label), ]
+        
+    mat.real <- as.matrix(real.centroid[, vars])
+    mat.synt <- as.matrix(synt.centroid[, vars])
+    distances <- sqrt(rowSums((mat.real - mat.synt)^2))
+    mean.distance[i] <- mean(distances)
+    
+    ## Average variance between centroids
+    real.var <- aggregate(. ~ label,
+                          data = lreal.data[, c(vars, "label")],
+                          FUN = var)
+    synt.var <- aggregate(. ~ label,
+                          data = lsynt.data[, c(vars, "label")],
+                          FUN = var)
+    real.var <- real.var[order(real.var$label), ]
+    synt.var <- synt.var[order(synt.var$label), ]
+    
+    mat.real.var <- as.matrix(real.var[, vars])
+    mat.synt.var <- as.matrix(synt.var[, vars])
+    
+    dif.var <- abs(mat.real.var - mat.synt.var)
+    mean.var[i] <- mean(dif.var)
+  }
+
+result_case3 <- data.frame(Specks = speck,
+                           Gini.real = rep(gini.real, m),
+                           Gini.synt = gini.syn,
+                           Sil.real = rep(sil.real, m),
+                           Sil.synt = sil.synt,
+                           Mean.distance = mean.distance,
+                           Mean.var = mean.var)
+result_case3 <- result_case3 %>%
+  mutate(Diff.gini = Gini.real - Gini.synt) %>%
+  mutate(Diff.sil = Sil.real - Sil.synt)
+```
+
+## Graphics
+```{r}
+metrics <- c("Diff.sil", "Diff.gini", "Mean.distance", "Mean.var")
+
+graphics3 <- list(length(metrics))
+
+for (i in seq_along(metrics)) {
+  graphics3[[i]] <- ggplot(result_case3, aes_string(x = "Specks", y = metrics[i])) +
+    geom_point(color = "#3182bd", size = 1) +
+    geom_smooth(method = "lm", se = TRUE, color = "#e6550d") +
+    theme_minimal(base_size = 14)
+}
+print(graphics3)
+
+library(patchwork)
+layout3 <- (graphics3[[1]] | graphics3[[2]]) /
+          (graphics3[[3]] | graphics3[[4]])
+
+print(layout3)
+
+library(ggplot2)
+ggsave(
+  filename = "specks_metrics_case2.png",
+  plot     = layout,
+  width    = 12,
+  height   = 6,
+  dpi      = 300
+)
+```
