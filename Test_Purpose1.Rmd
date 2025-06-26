@@ -1,0 +1,435 @@
+---
+title: "GINI"
+author: "Xinnuo Chen"
+date: "2025-05-06"
+output: html_document
+---
+
+# Libraries
+```{r}
+library(synthpop)
+library(NbClust)
+library(ggplot2)
+library(factoextra)
+library(DescTools) #index de Gini
+library(cluster) #index de Silhouette
+library(car) #scatterplot
+library(tidyverse)
+library(clue) #label switching
+library(caret) #calcular accuracy
+library(rpart)
+library(dgof)
+library(dplyr)
+library(tibble)
+library(paletteer)
+library(scales)
+library(tidyr)    # pivot_longer
+library(mvtnorm)
+```
+
+
+# Functions
+```{r}
+data.generation <- function(n, mu, sigma, seed = NULL)
+{
+  if(!is.null(seed)) set.seed(seed)
+  
+  p <- length(mu)
+  
+  if(is.null(sigma)){
+    sigma <- 0
+  }
+  
+  if(length(sigma)==1){
+    sigma <- matrix(rep(sigma, p*p), nrow=p, byrow=TRUE)
+    diag(sigma) <- 1
+  }
+  
+  mat <- rmvnorm(n, mean = mu, sigma = sigma)
+  as.data.frame(mat)
+}
+
+
+synt.data.generation <- function(real.data, m, methods){
+    syn.obj <- syn(real.data,
+                       method = rep(methods, ncol(real.data)),
+                       m = m,
+                       print.flag = FALSE, 
+                       proper = TRUE)
+    synt.data <- syn.obj$syn
+    specks.val <- numeric()
+    if(m==1){
+      names(synt.data) <- names(real.data)
+      data <- rbind(
+            cbind(real.data, label = 0),
+            cbind(synt.data, label = 1)
+          )
+      specks.val <- c(specks.val, specks(data = data)$Specks)
+      specks.value <- data.frame(SPECKS = specks.val)
+    } else {
+      for(k in 1:m){
+          names(synt.data[[k]]) <- names(real.data)
+          
+          data <- rbind(
+            cbind(real.data, label = 0),
+            cbind(synt.data[[k]], label = 1)
+          )
+          
+          specks.val <- c(specks.val, specks(data = data)$Specks)
+          specks.value <- data.frame(SPECKS = specks.val)
+      }
+    }
+    results <- list("Specks" = specks.value, "Syn data" = synt.data)
+    return(results)
+}
+
+
+specks <- function(data, sample=FALSE){   #### With pvalue
+  if(sample==TRUE){
+    data[,3] <- sample(data[,3])
+  }
+  
+  
+  logit_model <- glm(label ~ ., data = data, family = "binomial")
+  pred.prob <- predict(logit_model, type = "response")
+  
+  label.vector <- data$label
+  
+  prop.score.real  <- pred.prob[label.vector == 0]
+  prop.score.synt  <- pred.prob[label.vector == 1]
+  
+  ecdf.real  <- ecdf(prop.score.real)
+  ecdf.synth <- ecdf(prop.score.synt)
+  
+  all.scores <- sort(unique(c(prop.score.real, prop.score.synt)))
+  
+  specks.value <- max(abs(ecdf.real(all.scores) - ecdf.synth(all.scores)))
+  p.value <- suppressWarnings(ks.test(prop.score.real, prop.score.synt)$p)
+  
+  return(data.frame(
+    "Specks" = specks.value, 
+    "P-value" = p.value))
+}
+
+k.decision <- function(data, k.real = 0, synthetic = TRUE){ # K decision & clustering 
+  if(synthetic == FALSE){
+    kopt.obj <- NbClust(data = data, diss = NULL, distance = "euclidean", method = "kmeans", index = "all", alphaBeale = 0.1)
+    kopt <- as.numeric(names(table(as.vector(kopt.obj$Best.nc[1,])))[which.max(table(as.vector(kopt.obj$Best.nc[1,])))])
+    sdata <- scale(data)
+    clust <- kmeans(sdata, kopt, nstart = 25)
+    
+    clustering.result <- list("K optim" = kopt, "Clustering" = clust)
+    return(clustering.result)
+  } else {
+    kopt.obj <- NbClust(data = data, diss = NULL, distance = "euclidean", method = "kmeans", index = "all", alphaBeale = 0.1)
+    kopt <- as.numeric(names(table(as.vector(kopt.obj$Best.nc[1,])))[which.max(table(as.vector(kopt.obj$Best.nc[1,])))])
+    
+    if(kopt == k.real){
+      sdata <- scale(data)
+      clust <- kmeans(sdata, kopt, nstart = 25)
+      
+      clustering.result <- list("K optim" = kopt, "Clustering" = clust)
+      return(clustering.result)
+    }
+  }
+}
+
+label.switching <- function(km.real, km.synt){ # Label switching function
+  if(!is.null(km.synt)){
+      centroids <- rbind(km.real$centers, km.synt$centers)
+      dist.global <- as.matrix(dist(centroids, method = "euclidean"))
+      n.real <- nrow(km.real$centers)
+      n.synt <- nrow(km.synt$centers) 
+      dist <- dist.global[1:n.real, (n.real + 1) : (n.real + n.synt)]
+      label.ass <- solve_LSAP(dist, maximum = FALSE) 
+      
+      km.synt$recluster <- km.real$cluster
+      
+      for (i in 1:length(label.ass)) {
+        km.synt$recluster[km.synt$cluster == label.ass[i]] <- i
+      }
+  }
+  return(km.synt)
+}
+```
+
+
+# Anàlisis
+```{r}
+set.seed(12345)
+method <- c("cart")
+obs <- c(50)
+par <- c(2)
+cor <- c(0)
+total.m <- 2
+max.iter <- 50
+
+result <- data.frame(Num.obs=numeric(), Num.par=numeric(), Correlation=numeric(), Method=character(), Speck=numeric(), Gini.real=numeric(), Gini.synt=numeric())
+
+for(n in obs){
+  for (p in par){
+    for( corr in cor){
+      mu <- sample(1:200, p)
+      real.data <- data.generation(n, mu, sigma = corr)
+      
+      kd        <- k.decision(real.data, synthetic = FALSE)
+      k.real    <- kd$`K optim`
+      km.real   <- kd$Clustering
+      
+      gini.real <- Gini(km.real$size) # real gini
+  
+      for(met in method){
+        partial.m <- 0
+        iter <- 0
+        km.synt <- vector("list")
+        Specks <- numeric()
+        synt.data <- vector("list")
+        gini.synt <- numeric()
+        while(partial.m < total.m && iter < max.iter){
+          iter <- iter + 1
+          syn.out <- synt.data.generation(real.data, m=1, methods=met)
+          
+          clust <- k.decision(syn.out$`Syn data`, k.real = k.real, synthetic = TRUE)
+          if(!is.null(clust)){
+            partial.m <- partial.m + 1
+            km.synt[[partial.m]] <- clust$Clustering
+            Specks[partial.m] <- syn.out$Specks$SPECKS
+            synt.data[[partial.m]] <- syn.out$`Syn data`
+            gini.synt[partial.m] <- Gini(clust$Clustering$size)
+          }
+        }
+        
+        result <- rbind(result, data.frame(Num.obs=rep(n, length(Specks)), Num.par=rep(p, length(Specks)), Correlation=rep(corr, length(Specks)), Method=rep(met, length(Specks)), Speck=Specks[1:length(Specks)], Gini.real=rep(gini.real, length(Specks)), Gini.synt=gini.synt[1:length(Specks)]))
+      }
+        
+    }
+  }
+}
+
+print(result)
+
+set.seed(12345)
+method <- c("cart","norm")
+obs <- c(50, 1000)
+par <- c(2, 8)
+cor <- c(0, 0.7)
+total.m <- 100
+
+for(n in obs){
+  for (p in par){
+    for( corr in cor){
+      mu <- sample(1:200, p)
+      real.data <- data.generation(n, mu, sigma = corr)
+      
+      kd        <- k.decision(real.data, synthetic = FALSE)
+      k.real    <- kd$`K optim`
+      km.real   <- kd$Clustering
+      
+      gini.real <- Gini(km.real$size) #gini real
+  
+      for(met in method){
+        
+        syn.out <- synt.data.generation(real.data, m=total.m, methods=met)
+        synt.data <- syn.out$`Syn data`
+          
+        clust <- lapply(synt.data, k.decision, k.real = k.real, synthetic = TRUE)
+        
+        for(i in 1:total.m){
+            if(!is.null(clust[[i]])){
+              km.synt <- clust[[i]]$Clustering
+              Specks <- syn.out$Specks$SPECKS[i]
+              synt.data <- syn.out$`Syn data`[[i]]
+              gini.synt <- Gini(clust[[i]]$Clustering$size)
+              
+              result <- rbind(result, data.frame(Num.obs=n, Num.par=p, Correlation=corr, Method=met, Speck=Specks, Gini.real=gini.real, Gini.synt=gini.synt))
+           }
+        }
+      }
+    }
+  }
+}
+print(result)
+
+```
+
+# Adding clusters
+```{r}
+simulate_one <- function(row) 
+{
+  n     <- row$n
+  p     <- row$p
+  corr  <- row$corr
+  met <- row$met
+  clust <- row$clust
+  sep <- row$sep
+  
+  if(sep=="2SD"){
+    sep <- -0.32
+  } else if(sep=="6SD"){
+    sep <- 0.21
+  } else if(sep=="null"){
+   sep <- 0
+  }
+  
+  sim <- genRandomClust(numClust=clust, 
+                        sepVal=sep, 
+                        numNonNoisy = p, 
+                        clustszind = 1, 
+                        clustSizeEq = n/clust,
+                        numReplicate = 1)
+  real.data <- as.data.frame(sim$datList[[1]])
+  
+  kd        <- k.decision(real.data, synthetic = FALSE)
+  k.real    <- kd$`K optim`
+  km.real   <- kd$Clustering
+  vars <- names(real.data)
+  
+  gini.real <- Gini(km.real$size)
+  
+  lreal.data <- real.data
+  lreal.data$label <- as.factor(km.real$cluster)
+  
+  out <- data.frame()
+  
+  # Generation 
+    
+  syn.out   <- synt.data.generation(real.data, m = total.m, methods = met)
+  synt.list <- syn.out$`Syn data`
+    
+  # Clustering
+  clust <-lapply(synt.list, k.decision,
+                  k.real = k.real, synthetic = TRUE)
+  idx.nonull <- which(!sapply(clust, is.null))
+  clust <- clust[idx.nonull]
+  synt.list <- synt.list[idx.nonull]
+    
+  km.synt <- lapply(clust, `[[`, "Clustering")
+  ls.km.synt <- lapply(km.synt, label.switching, km.real)
+  
+  # Metrics
+  speck   <- syn.out$Specks$SPECKS[idx.nonull]
+  gini.syn <- sapply(km.synt, function(km) Gini(km$size))
+        
+  mean.distance <- numeric(length(idx.nonull))
+  for (i in seq_along(km.synt)){
+    lsynt.data <- synt.list[[i]]
+    lsynt.data$label <- factor(ls.km.synt[[i]]$recluster)
+    real.centroid <- aggregate(. ~ label,
+                                data = lreal.data[, c(vars, "label")],
+                                FUN = base::mean)
+    synt.centroid <- aggregate(. ~ label,
+                                data = lsynt.data[, c(vars, "label")],
+                                FUN = base::mean)
+    real.centroid <- real.centroid[order(real.centroid$label), ]
+    synt.centroid <- synt.centroid[order(synt.centroid$label), ]
+        
+    mat.real <- as.matrix(real.centroid[, vars])
+    mat.synt <- as.matrix(synt.centroid[, vars])
+    distances <- sqrt(rowSums((mat.real - mat.synt)^2))
+    mean.distance[i] <- mean(distances)
+  }      
+  out <- rbind(out,
+    data.frame(Num.obs  = rep(n, length(idx.nonull)),
+               Num.par  = rep(p, length(idx.nonull)),
+               Correlation = rep(corr, length(idx.nonull)),
+               Method   = rep(met,length(idx.nonull)),
+               Speck    = speck,
+               Gini.real = rep(gini.real, length(idx.nonull)),
+               Gini.synt = gini.syn,
+               Mean.distance = mean.distance))
+  
+  return(out)
+}
+
+
+n.cores <- detectCores() - 1
+cl <- makeCluster(n.cores)
+total.m <- 5
+
+
+clusterEvalQ(cl, {
+  library(mvtnorm)
+  library(NbClust)
+  library(synthpop)
+  library(clue)
+  library(DescTools)
+  library(clusterGeneration)
+})
+
+
+clusterExport(cl, # functions
+  varlist = c("simulate_one",
+              "data.generation",
+              "synt.data.generation",
+              "k.decision",
+              "label.switching",
+              "specks",
+              "total.m"),
+  envir = .GlobalEnv)
+
+
+clusterSetRNGStream(cl, iseed = 12345)
+
+
+method <- c("cart")
+obs <- c(50)
+par <- c(2)
+cor <- c(0)
+numClust <- c(2)
+separation <- c("2SD")
+
+param.grid <- expand.grid(n = obs,
+                          p = par,
+                          corr = cor,
+                          met = method,
+                          clust = numClust,
+                          sep = separation,
+                          KEEP.OUT.ATTRS = FALSE)
+
+result.list <- parLapply(
+  cl,
+  X   = split(param.grid, seq_len(nrow(param.grid))),
+  fun = simulate_one
+)
+
+result <- do.call(rbind, result.list)
+
+save(result.list, file = "Result_Gini_Mean.diff_300.RData")
+load(file = "~/Documents/UNI/TFG/MEAN DISTANCE/Result_Gini_Mean.diff_300.RData")
+stopCluster(cl)
+
+
+```
+
+# Graphics
+```{r}
+library(dplyr)
+
+result <- result %>%
+  mutate(Diff.gini = abs(Gini.real - Gini.synt))
+
+
+library(ggplot2)
+library(glue)
+
+result %>% 
+  group_by(Num.obs, Num.par, Correlation, Method) %>% 
+  group_walk(~ {
+    p <- ggplot(.x, aes(Speck, Mean.distance)) +
+      geom_point(alpha = .7) +
+      geom_smooth(method = "lm", se = FALSE) +
+      labs(
+        title = glue("Obs={.y$Num.obs}, Par={.y$Num.par}, ",
+                     "Corr={.y$Correlation}, Method={.y$Method}"),
+        x = "Specks", y = "Mean distance"
+      ) +
+      theme_minimal()
+
+    file <- glue("corplot_{.y$Num.obs}_{.y$Num.par}_",
+                 "{.y$Correlation}_{.y$Method}.png")
+    ggsave(file, p, width = 6, height = 4, dpi = 300)
+  })
+```
+
+
+
