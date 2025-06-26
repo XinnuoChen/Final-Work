@@ -1,0 +1,1571 @@
+---
+title: "REU0605"
+author: "Xinnuo Chen"
+date: "2025-06-01"
+output: html_document
+---
+
+```{r}
+# Funcions i llibreries
+library(ggplot2)
+library(mvtnorm)
+library(synthpop)
+library(NbClust)
+library(ggplot2)
+library(factoextra)
+library(DescTools) #index de Gini
+library(cluster) #index de Silhouette
+library(car) #scatterplot
+library(tidyverse)
+library(clue) #label switching
+library(caret) #calcular accuracy
+library(rpart)
+library(dgof)
+library(dplyr)
+library(tibble)
+library(paletteer)
+library(scales)
+library(tidyr)    # pivot_longer
+library(mvtnorm)
+
+synt.data.generation <- function(real.data, m, methods){
+    syn.obj <- syn(real.data,
+                       method = rep(methods, ncol(real.data)),
+                       m = m,
+                       print.flag = FALSE, 
+                       proper = TRUE)
+    synt.data <- syn.obj$syn
+    specks.val <- numeric()
+    if(m==1){
+      names(synt.data) <- names(real.data)
+      data <- rbind(
+            cbind(real.data, label = 0),
+            cbind(synt.data, label = 1)
+          )
+      specks.val <- c(specks.val, specks.correct(data = data)$Specks)
+      specks.value <- data.frame(SPECKS = specks.val)
+    } else {
+      for(k in 1:m){
+          names(synt.data[[k]]) <- names(real.data)
+          
+          data <- rbind(
+            cbind(real.data, label = 0),
+            cbind(synt.data[[k]], label = 1)
+          )
+          
+          specks.val <- c(specks.val, specks.correct(data = data)$Specks)
+          specks.value <- data.frame(SPECKS = specks.val)
+      }
+    }
+    results <- list("Specks" = specks.value, "Syn data" = synt.data)
+    return(results)
+}
+
+
+label.switching <- function(km.real, km.synt){ # Label switching function
+  if(!is.null(km.synt)){
+      centroids <- rbind(km.real$centers, km.synt$centers)
+      dist.global <- as.matrix(dist(centroids, method = "euclidean"))
+      n.real <- nrow(km.real$centers) #numero de cluster en real
+      n.synt <- nrow(km.synt$centers) #numero de cluster en synt
+      dist <- dist.global[1:n.real, (n.real + 1) : (n.real + n.synt)]
+      label.ass <- solve_LSAP(dist, maximum = FALSE) 
+      
+      # Reetiquetació els clústers sintètics
+      km.synt$recluster <- km.real$cluster # nova variable
+      
+      for (i in 1:length(label.ass)) {
+        km.synt$recluster[km.synt$cluster == label.ass[i]] <- i
+      }
+  }
+  return(km.synt)
+}
+
+centroid.generation <- function(k = k, p = p, separation = separation) {
+  centroids <- matrix(NA, nrow = k, ncol = p)
+  centroids[1, ] <- rep(0, p)                 # primer centroide a l'origen 
+  for (i in 2:k) {
+    tries <- 0
+    repeat {
+      vector <- rnorm(p)                      # un punt aleatori
+      vector <- vector / sqrt(sum(vector^2))  # normalitzar el vector del punt
+      vector <- vector * separation           # punt a distància separation de l’origen
+      
+      dists <- sqrt(rowSums((centroids[1:(i - 1), , drop = FALSE] -  # distàncies del nou punt amb cada un dels ja fixats.
+                             matrix(vector, nrow = i - 1, ncol = p, byrow = TRUE))^2))
+      if (all(dists >= separation)) {         # si el nou punt compleix la separació s'accepta
+        centroids[i, ] <- vector
+        break
+      }
+      tries <- tries + 1                      # evitar bucle infinit
+      if (tries > 1000) stop("No s'han pogut generar centroides prou separats.")
+    }
+  }
+  return(centroids)
+}
+
+data.generation <- function(N, p, rho, separation, k){
+  # posició dels centroides
+  centroids <- centroid.generation(k = k, p = p, separation = separation)
+  
+  # matriu de correlacions
+  R <- matrix(rho, nrow = p, ncol = p)
+  diag(R) <- 1
+  
+  # matriu de covariàncies
+  sd <- rep(1, p)
+  D <- diag(sd)
+  Sigma <- D %*% R %*% D  #
+  
+  # generació de dades per cada cluster
+  n <- round(N/k, digits = 0)
+  clusters <- lapply(1:k, function(i) {
+    rmvnorm(n,
+            mean  = centroids[i, ],
+            sigma = Sigma)
+  })
+  data <- do.call(rbind, clusters)
+  data <- data.frame(data, group = factor(rep(1:k, each = n)))
+  
+  # representació gràfica
+  Graphic <- ggplot(data, aes(x = X1, y = X2, color = group)) +
+                geom_point(size = 2) +
+                scale_color_brewer(palette = "Set1") +
+                labs(
+                  title = "First dimention representation",
+                  color = "Cluster"
+                ) +
+                theme_minimal(base_size = 14)
+  result <- list("Data" = data[,-ncol(data)], "Graphic"=Graphic, "Clusters" = clusters)
+}
+
+specks.correct <- function(data, sample=FALSE){   #### With pvalue
+  if(sample==TRUE){
+    data[,3] <- sample(data[,3])
+  }
+  
+  N <- nrow(data)
+  idx <- sample(1:N, round(N*0.3, digits=0))
+  
+  data.train <- data[-idx,]
+  data.test <- data[idx,]
+  
+  logit_model <- glm(label ~ ., data = data.train, family = "binomial")
+  
+  pred.prob <- predict(logit_model, newdata = data.test, type = "response")
+  
+  label.vector <- data.test$label
+  
+  prop.score.real  <- pred.prob[label.vector == 0]
+  prop.score.synt  <- pred.prob[label.vector == 1]
+  
+  ecdf.real  <- ecdf(prop.score.real)
+  ecdf.synth <- ecdf(prop.score.synt)
+  
+  all.scores <- sort(unique(c(prop.score.real, prop.score.synt)))
+  
+  specks.value <- max(abs(ecdf.real(all.scores) - ecdf.synth(all.scores)))
+  p.value <- suppressWarnings(ks.test(prop.score.real, prop.score.synt)$p)
+  
+  return(data.frame(
+    "Specks" = specks.value, 
+    "P-value" = p.value))
+}
+
+k.decision <- function(data, k.real = 0, synthetic = TRUE){ # K decision & clustering 
+  if(synthetic == FALSE){
+    sil <- fviz_nbclust(data, kmeans, method = "silhouette")$data
+    kopt <- as.numeric(sil$clusters[which.max(sil$y)])
+    
+    sdata <- scale(data)
+    clust <- kmeans(sdata, kopt, nstart = 25)
+    
+    clustering.result <- list("K optim" = kopt, "Clustering" = clust)
+    return(clustering.result)
+  } else {
+    sil <- fviz_nbclust(data, kmeans, method = "silhouette")$data
+    kopt <- as.numeric(sil$clusters[which.max(sil$y)])
+    
+    if(kopt == k.real){
+      sdata <- scale(data)
+      clust <- kmeans(sdata, kopt, nstart = 25) #resultado de clustering
+      
+      clustering.result <- list("K optim" = kopt, "Clustering" = clust)
+      return(clustering.result)
+    }
+  }
+}
+```
+
+
+# Content:
+-   Graph of clusters superimposed by different scenarios of separation between centroids.
+-   Gini for unbalanced cluster
+
+# (1). Graph of clusters superimposed by different scenarios of separation between centroids.
+
+```{r}
+set.seed(12)
+rdata <- data.generation(250, p = 2, rho = 0, separation = 10, k = 2)
+
+real.data <- rdata$Data
+rdata$Graphic
+
+sdata <- synt.data.generation(real.data, m = 1, method = "cart")
+synt.data <- sdata$`Syn data`
+
+real.wss <- fviz_nbclust(real.data, kmeans, method="silhouette")$data
+real.k <- as.numeric(real.wss$clusters[which.max(real.wss$y)])
+
+synt.wss <- fviz_nbclust(synt.data, kmeans, method="silhouette")$data
+synt.k <- as.numeric(synt.wss$clusters[which.max(synt.wss$y)])
+real.k
+synt.k
+
+# Clustering
+real.km <- kmeans(real.data, real.k, nstart = 25)
+synt.km <- kmeans(synt.data, synt.k, nstart = 25)
+synt.km <- label.switching(real.km, synt.km)
+synt.km$cluster <- synt.km$recluster
+
+real.col <- "#3182bd"
+synt.col <- "#e6550d"
+
+real.clust <- fviz_cluster(real.km, data = real.data,
+               geom  = "point",
+               palette = rep(real.col, nrow(real.km$centers)),
+               ellipse.type = "euclid",
+               stand        = FALSE,
+               star.plot = TRUE, 
+               ggtheme = theme_minimal())
+
+synt.clust <- fviz_cluster(synt.km, data = synt.data,
+               geom  = "point",
+               palette = rep(synt.col, nrow(synt.km$centers)),
+               ellipse.type = "euclid",
+               stand        = FALSE,
+               star.plot = TRUE, 
+               ggtheme = theme_minimal())
+
+real.clust
+synt.clust
+```
+
+
+## Superimposed graphics
+```{r}
+df.all <- bind_rows(
+  real.data %>% mutate(set = "Real",
+                       cluster = factor(real.km$cluster)),
+  synt.data %>% mutate(set = "Synt",
+                       cluster = factor(synt.km$cluster))
+)
+
+centres  <- df.all %>%
+  group_by(set, cluster) %>%
+  summarise(cx = mean(X1), cy = mean(X2), .groups = "drop")
+
+segments <- df.all %>% left_join(centres, by = c("set", "cluster"))
+
+real.col <- "#3182bd"   # real set color
+synt.col <- "#e6550d"   # synthetic set color
+
+# Superimposed graphics
+cluter.graph <- ggplot() +
+  geom_segment(data = segments, # line
+               aes(x = X1, y = X2, xend = cx, yend = cy,
+                   colour = set),
+               linewidth = .3, alpha = .55) +
+
+  geom_point(data = df.all, # point
+             aes(X1, X2, colour = set, shape = cluster),
+             size = .5) +
+
+  stat_ellipse(data  = df.all,
+               aes(X1, X2,
+                   group  = interaction(set, cluster),
+                   colour = set),
+               type  = "euclid",
+               level = 1,
+               linewdth = 1,
+               alpha = .25) +
+
+  scale_colour_manual(values = c(Real = real.col, Synt = synt.col),
+                      name = "Data type") +
+  scale_fill_manual(values   = c(Real = alpha(real.col, .25),
+                                 Synt = alpha(synt.col, .25)),
+                    guide = "none") +
+  scale_shape_manual(values = c(`1` = 16, `2` = 17, `3` = 15, `4` = 3)) +
+
+  labs(title = "Real vs Synthetic clusters",
+       x = "X1", y = "X2",
+       shape = "Cluster group") +
+  theme_minimal(base_size = 13)
+```
+
+
+## Function for superimposed graphics generation
+```{r}
+separation <- c(2, 6, 10)
+k <- c(2, 3, 4)
+
+plots <- list()                     # store the plots in a list
+max_try <- 100
+
+for(i in separation){
+  for(j in k){
+    ntry <- 0
+    repeat{
+      set.seed(ntry)
+      rdata <- data.generation(250, p = 2, rho = 0, separation = i, k = j)
+      real.data <- rdata$Data
+      
+      sdata <- synt.data.generation(real.data, m = 1, method = "cart")
+      synt.data <- sdata$`Syn data`
+      
+      real.wss <- fviz_nbclust(real.data, kmeans, method="silhouette")$data
+      real.k <- as.numeric(real.wss$clusters[which.max(real.wss$y)])
+      
+      synt.wss <- fviz_nbclust(synt.data, kmeans, method="silhouette")$data
+      synt.k <- as.numeric(synt.wss$clusters[which.max(synt.wss$y)])
+      
+      if( (real.k == synt.k) && (real.k == j) ) break
+      
+      ntry <- ntry + 1             # attempt control
+      if (ntry >= max_try) {
+        warning(sprintf("sep=%s, k=%s: no match after % attempts.",
+                        i, j, max_try))
+        break
+      }
+    }
+    
+    if (real.k != synt.k) next
+    
+    # clustering
+    real.km <- kmeans(real.data, real.k, nstart = 25)
+    synt.km <- kmeans(synt.data, synt.k, nstart = 25)
+    synt.km <- label.switching(real.km, synt.km)
+    synt.km$cluster <- synt.km$recluster
+    
+    # graphic
+    df.all <- bind_rows(
+      real.data %>% mutate(set = "Real",
+                           cluster = factor(real.km$cluster)),
+      synt.data %>% mutate(set = "Synt",
+                           cluster = factor(synt.km$cluster))
+    )
+      
+    centres  <- df.all %>%
+      group_by(set, cluster) %>%
+      summarise(cx = mean(X1), cy = mean(X2), .groups = "drop")
+    
+    segments <- df.all %>% left_join(centres, by = c("set", "cluster"))
+    
+    # graphic colour
+    real.col <- "#3182bd"
+    synt.col <- "#e6550d"
+      
+    gname <- sprintf("sep%s_k%s", i, j)
+      
+    # superimposed graphic
+    p <- ggplot() +
+      geom_segment(data = segments, # line
+                   aes(x = X1, y = X2, xend = cx, yend = cy,
+                       colour = set),
+                   linewidth = .3, alpha = .55) +
+      
+      geom_point(data = df.all, # point
+                 aes(X1, X2, colour = set, shape = cluster),
+                 size = .5) +
+      
+      stat_ellipse(data  = df.all, #
+                   aes(X1, X2,
+                       group  = interaction(set, cluster),
+                       colour = set),
+                   type  = "euclid",
+                   level = 1,
+                   linewidth = 1,
+                   alpha = .25) +
+      scale_colour_manual(values = c(Real = real.col, Synt = synt.col),
+                          name = "Data type") +
+      scale_fill_manual(values   = c(Real = alpha(real.col, .25),
+                                     Synt = alpha(synt.col, .25)),
+                        guide = "none") +
+      scale_shape_manual(values = c(`1` = 16, `2` = 17, `3` = 15, `4` = 3)) +
+      
+      labs(title = sprintf("%sSD separation & %s cluster", i, j),
+           x = "X1", y = "X2",
+           shape = "Cluster group") +
+      theme_minimal(base_size = 13)
+      
+    ggsave(filename = paste0("plot_", gname, ".png"),
+           plot     = p,
+           width    = 4, height = 3, dpi = 300)
+
+    plots[[gname]] <- p
+  }
+}
+
+plots
+
+layout <- ((plots[[1]]  | plots[[2]]  | plots[[3]]) /
+            (plots[[4]]  | plots[[5]]  | plots[[6]] ) /
+            (plots[[7]]  | plots[[8]]  | plots[[9]] ))
+
+print(layout)
+
+ggsave(
+  filename = "Real_VS_Synthetic.png",
+  plot     = layout,
+  width    = 27, 
+  height   = 15,
+  dpi      = 300
+)
+```
+
+
+## Equalise graph scale
+```{r}
+set.seed(12345)
+separation <- c(2, 6, 10)
+k <- c(2, 3, 4)
+
+plots <- list()
+max_try <- 100
+data.list <- list()
+
+for(i in separation){
+  for(j in k){
+    ntry <- 0
+    repeat{
+      set.seed(ntry)
+      rdata <- data.generation(250, p = 2, rho = 0, separation = i, k = j)
+      real.data <- rdata$Data
+
+      sdata <- synt.data.generation(real.data, m = 1, method = "cart")
+      synt.data <- sdata$`Syn data`
+
+      real.wss <- fviz_nbclust(real.data, kmeans, method="silhouette")$data
+      real.k <- as.numeric(real.wss$clusters[which.max(real.wss$y)])
+
+      synt.wss <- fviz_nbclust(synt.data, kmeans, method="silhouette")$data
+      synt.k <- as.numeric(synt.wss$clusters[which.max(synt.wss$y)])
+
+      if( (real.k == synt.k) && (real.k == j) ) break
+
+      ntry <- ntry + 1
+      if (ntry >= max_try) {
+        warning(sprintf("sep=%s, k=%s: no match after % attempts.", i, j, max_try))
+        break
+      }
+    }
+
+    if (real.k != synt.k) next
+
+    real.km <- kmeans(real.data, real.k, nstart = 25)
+    synt.km <- kmeans(synt.data, synt.k, nstart = 25)
+    synt.km <- label.switching(real.km, synt.km)
+    synt.km$cluster <- synt.km$recluster
+
+    df.all <- bind_rows(
+      real.data %>% mutate(set = "Real", cluster = factor(real.km$cluster)),
+      synt.data %>% mutate(set = "Synt", cluster = factor(synt.km$cluster))
+    )
+
+    gname <- sprintf("sep%s_k%s", i, j)
+    data.list[[gname]] <- list(data = df.all, title = sprintf("%sSD separation & %s cluster", i, j))
+
+# Uncaled individual graphs
+    centres <- df.all %>%
+      group_by(set, cluster) %>%
+      summarise(cx = mean(X1), cy = mean(X2), .groups = "drop")
+
+    segments <- df.all %>% left_join(centres, by = c("set", "cluster"))
+
+    real.col <- "#3182bd"
+    synt.col <- "#e6550d"
+
+    p <- ggplot() +
+      geom_segment(data = segments,
+                   aes(x = X1, y = X2, xend = cx, yend = cy,
+                       colour = set),
+                   linewidth = .3, alpha = .55) +
+      geom_point(data = df.all,
+                 aes(X1, X2, colour = set, shape = cluster),
+                 size = .5) +
+      stat_ellipse(data  = df.all,
+                   aes(X1, X2,
+                       group  = interaction(set, cluster),
+                       colour = set),
+                   type = "euclid",
+                   level = 1,
+                   linewidth = 1,
+                   alpha = .25) +
+      scale_colour_manual(values = c(Real = real.col, Synt = synt.col),
+                          name = "Data type") +
+      scale_fill_manual(values = c(Real = alpha(real.col, .25),
+                                   Synt = alpha(synt.col, .25)),
+                        guide = "none") +
+      scale_shape_manual(values = c(`1` = 16, `2` = 17, `3` = 15, `4` = 3)) +
+      labs(title = sprintf("%sSD separation & %s cluster", i, j),
+           x = "X1", y = "X2",
+           shape = "Cluster group") +
+      theme_minimal(base_size = 13)
+
+    plots[[gname]] <- p
+  }
+}
+
+layout_original <- (plots[[1]] | plots[[2]] | plots[[3]]) /
+                   (plots[[4]] | plots[[5]] | plots[[6]]) /
+                   (plots[[7]] | plots[[8]] | plots[[9]])
+
+
+# Extrem graphics rescaled
+selected_ids <- c(1, 3, 7, 9)
+selected_names <- names(plots)[selected_ids]
+
+x_range <- c(Inf, -Inf)
+y_range <- c(Inf, -Inf)
+
+for(gname in selected_names) {
+  df <- data.list[[gname]]$data
+  x_range[1] <- min(x_range[1], min(df$X1))
+  x_range[2] <- max(x_range[2], max(df$X1))
+  y_range[1] <- min(y_range[1], min(df$X2))
+  y_range[2] <- max(y_range[2], max(df$X2))
+}
+
+plots_rescaled <- list()
+
+for(gname in selected_names) {
+  df.all <- data.list[[gname]]$data
+  title  <- data.list[[gname]]$title
+
+  centres <- df.all %>%
+    group_by(set, cluster) %>%
+    summarise(cx = mean(X1), cy = mean(X2), .groups = "drop")
+
+  segments <- df.all %>% left_join(centres, by = c("set", "cluster"))
+
+  real.col <- "#3182bd"
+  synt.col <- "#e6550d"
+
+  p <- ggplot() +
+    geom_segment(data = segments,
+                 aes(x = X1, y = X2, xend = cx, yend = cy,
+                     colour = set),
+                 linewidth = .3, alpha = .55) +
+    geom_point(data = df.all,
+               aes(X1, X2, colour = set, shape = cluster),
+               size = .5) +
+    stat_ellipse(data  = df.all,
+                 aes(X1, X2,
+                     group  = interaction(set, cluster),
+                     colour = set),
+                 type = "euclid",
+                 level = 1,
+                 linewidth = 1,
+                 alpha = .25) +
+    scale_colour_manual(values = c(Real = real.col, Synt = synt.col),
+                        name = "Data type") +
+    scale_fill_manual(values = c(Real = alpha(real.col, .25),
+                                 Synt = alpha(synt.col, .25)),
+                      guide = "none") +
+    scale_shape_manual(values = c(`1` = 16, `2` = 17, `3` = 15, `4` = 3)) +
+    labs(title = title,
+         x = "X1", y = "X2",
+         shape = "Cluster group") +
+    coord_cartesian(xlim = x_range, ylim = y_range) +
+    theme_minimal(base_size = 13)
+
+  plots_rescaled[[gname]] <- p
+}
+
+layout_rescaled <- (plots_rescaled[[1]] | plots_rescaled[[2]]) /
+                   (plots_rescaled[[3]] | plots_rescaled[[4]]) 
+
+ggsave(
+  filename = "Real_VS_Synthetic.png",
+  plot     = layout_original,
+  width    = 27,
+  height   = 15,
+  dpi      = 300
+)
+
+ggsave(
+  filename = "Real_VS_Synthetic_scaled.png",
+  plot     = layout_rescaled,
+  width    = 27,
+  height   = 15,
+  dpi      = 300
+)
+```
+
+
+## (2). Factors reanalysis
+
+# All metrics
+```{r}
+library(parallel)
+
+simulate_one <- function(factor.combination) # Calcul function for each combination
+{
+  N <- factor.combination$N
+  p <- factor.combination$p
+  k <- factor.combination$k
+  rho <- factor.combination$rho
+  method <- factor.combination$method
+  separation <- factor.combination$separation
+  total.m <- total.m
+  
+  count <- 0
+  repeat{
+    set.seed(count)
+    real.data <- data.generation(N, p, rho, separation, k)$Data
+  
+    kd        <- k.decision(real.data, synthetic = FALSE)
+    k.real    <- kd$`K optim`
+    if(k.real == k) break
+    
+    count <- count + 1
+    if(count >= total.m){
+      warning("No combination of data with %k number of clusters found")
+    }
+  }
+  
+  km.real   <- kd$Clustering
+  vars <- names(real.data)
+  
+  gini.real <- Gini(km.real$size)
+  sil.real <- mean(silhouette(km.real$cluster, dist(real.data))[,3])
+    
+  lreal.data <- real.data
+  lreal.data$label <- as.factor(km.real$cluster)
+  
+  out <- data.frame()
+  
+  # Synthetic data generation
+  count <- 0
+  m <- 0
+  synt.data <- list()
+  km.synt <- list()
+  k.synt <- numeric()
+  speck <- numeric()
+  while(m < total.m){
+    set.seed(m + count)
+    count <- count + 1
+    syn   <- synt.data.generation(real.data, m = 1, methods = method)
+    clust <- k.decision.noscale(syn$`Syn data`, k.real = k.real)
+    if(!is.null(clust)){
+      m <- m + 1
+      synt.data[[m]] <- syn$`Syn data`
+      km.synt[[m]] <- clust$Clustering
+      k.synt[m] <- clust$`K optim`
+      speck[m] <- syn$Specks$SPECKS
+    }
+  }
+  
+  ls.km.synt <- lapply(km.synt, label.switching, km.real) # Synthetic data after label switching
+  
+  # Metrics
+  
+  ## Gini
+  gini.syn <- sapply(km.synt, function(km) Gini(km$size))
+  
+  sil.synt <- numeric(m)      
+  mean.distance <- numeric(m)
+  mean.var <- numeric(m)
+  for (i in seq_along(km.synt)){
+    lsynt.data <- synt.data[[i]]
+    lsynt.data$label <- factor(ls.km.synt[[i]]$recluster)
+    
+    ## Silhouette
+    sil.synt[i] <- mean(silhouette(km.synt[[i]]$cluster, dist(synt.data[[i]]))[,3])
+    
+    ## Mean distance between centroids 
+    real.centroid <- aggregate(. ~ label,
+                                data = lreal.data[, c(vars, "label")],
+                                FUN = base::mean)
+    synt.centroid <- aggregate(. ~ label,
+                                data = lsynt.data[, c(vars, "label")],
+                                FUN = base::mean)
+    real.centroid <- real.centroid[order(real.centroid$label), ]
+    synt.centroid <- synt.centroid[order(synt.centroid$label), ]
+        
+    mat.real <- as.matrix(real.centroid[, vars])
+    mat.synt <- as.matrix(synt.centroid[, vars])
+    distances <- sqrt(rowSums((mat.real - mat.synt)^2))
+    mean.distance[i] <- mean(distances)
+    
+    ## Mean variance between centroids 
+    real.var <- aggregate(. ~ label,
+                          data = lreal.data[, c(vars, "label")],
+                          FUN = var)
+    synt.var <- aggregate(. ~ label,
+                          data = lsynt.data[, c(vars, "label")],
+                          FUN = var)
+    real.var <- real.var[order(real.var$label), ]
+    synt.var <- synt.var[order(synt.var$label), ]
+    
+    mat.real.var <- as.matrix(real.var[, vars])
+    mat.synt.var <- as.matrix(synt.var[, vars])
+    
+    dif.var <- abs(mat.real.var - mat.synt.var)
+    mean.var[i] <- mean(dif.var)
+  }      
+  out <- rbind(out,
+    data.frame(N = rep(N, m),
+               p = rep(p, m),
+               k = rep(k, m),
+               rho = rep(rho, m),
+               method = rep(method, m),
+               separation = rep(separation, m),
+               k.real = rep(k.real, m),
+               Speck = speck,
+               count = rep(count, m),
+               Gini.real = rep(gini.real, m),
+               Gini.synt = gini.syn,
+               Sil.real = rep(sil.real, m),
+               Sil.synt = sil.synt,
+               Mean.distance = mean.distance,
+               Mean.var = mean.var))
+  return(out)
+}
+
+
+n.cores <- detectCores() - 1
+cl <- makeCluster(n.cores)
+total.m <- 50
+
+
+clusterEvalQ(cl, {
+  library(mvtnorm)
+  library(NbClust)
+  library(synthpop)
+  library(clue)
+  library(DescTools)
+  library(factoextra)
+  library(cluster)
+})
+
+
+clusterExport(cl, # functions
+  varlist = c("simulate_one",
+              "data.generation",
+              "centroid.generation",
+              "synt.data.generation",
+              "k.decision.noscale",
+              "label.switching",
+              "specks.correct",
+              "total.m"),
+  envir = .GlobalEnv)
+
+
+clusterSetRNGStream(cl, iseed = 123)
+
+method <- c("norm")
+N <- c(50)
+p <- c(2, 5, 10)
+rho <- c(0)
+k <- c(2, 3, 4)
+separation <- c(0.1, 2, 6, 10)
+
+param.grid <- expand.grid(N = N, # all possible combinations
+                          p = p,
+                          k = k,
+                          rho = rho,
+                          method = method,
+                          separation = separation,
+                          KEEP.OUT.ATTRS = FALSE)
+
+timenorm <- system.time(
+result.list <- parLapply(
+  cl,
+  X   = split(param.grid, seq_len(nrow(param.grid))),
+  fun = simulate_one
+)
+)
+
+result_norm_50_allmetrics <- do.call(rbind, result.list)
+
+stopCluster(cl)
+```
+
+
+### Univariante analysis
+#### Separation
+```{r}
+library(tidyverse)
+
+result <- rbind(result_cart_50_allmetrics, result_cart_50_allmetrics)
+
+result <- result %>%
+  mutate(Diff.gini = Gini.real - Gini.synt) %>%
+  mutate(Diff.sil = Sil.real - Sil.synt)
+
+distance <- result %>%
+  mutate(separation = factor(separation,
+                             levels = sort(unique(separation)),
+                             labels = paste0(sort(unique(separation)), "σ")))
+
+# Diff.gini
+distance.gini <- ggplot(distance, aes(x = separation, y = Diff.gini)) +
+  geom_boxplot(fill = "#6E9FC6", outlier.size = 1) +
+  labs(
+    x     = "Separation",
+    y     = "Diff.gini"
+  ) +
+  theme_minimal(base_size = 14)
+
+# Diff.sil
+distance.sil <- ggplot(distance, aes(x = separation, y = Diff.sil)) +
+  geom_boxplot(fill = "#6E9FC6", outlier.size = 1) +
+  labs(
+    x     = "Separation",
+    y     = "Diff.sil"
+  ) +
+  theme_minimal(base_size = 14)
+
+# Mean.distance
+distance.mean <- ggplot(distance, aes(x = separation, y = Mean.distance)) +
+  geom_boxplot(fill = "#6E9FC6", outlier.size = 1) +
+  labs(
+    x     = "Separation",
+    y     = "Mean.distance"
+  ) +
+  theme_minimal(base_size = 14)
+
+# Mean.var
+distance.var <- ggplot(distance, aes(x = separation, y = Mean.var)) +
+  geom_boxplot(fill = "#6E9FC6", outlier.size = 1) +
+  labs(
+    x     = "Separation",
+    y     = "Mean.var"
+  ) +
+  theme_minimal(base_size = 14)
+
+# Specks
+distance.speck <- ggplot(distance, aes(x = separation, y = Speck)) +
+  geom_boxplot(fill = "#6E9FC6", outlier.size = 1) +
+  labs(
+    x     = "Separation",
+    y     = "Specks"
+  ) +
+  theme_minimal(base_size = 14)
+
+
+print(distance.gini)
+print(distance.sil)
+print(distance.mean)
+print(distance.var)
+print(distance.speck)
+```
+
+#### Cluster
+```{r}
+clusternum <- result %>%
+  mutate(separation = factor(k,
+                             levels = sort(unique(k)),
+                             labels = sort(unique(k))))
+
+# Diff.gini
+clusternum.gini <- ggplot(clusternum, aes(x = factor(k), y = Diff.gini)) +
+  geom_boxplot(fill = "#6E9FC6", outlier.size = 1) +
+  labs(
+    x     = "Cluster"
+  ) +
+  theme_minimal(base_size = 14)
+
+# Diff.sil
+clusternum.sil <- ggplot(clusternum, aes(x = factor(k), y = Diff.sil)) +
+  geom_boxplot(fill = "#6E9FC6", outlier.size = 1) +
+  labs(
+    x     = "Cluster"
+  ) +
+  theme_minimal(base_size = 14)
+
+# Mean.distance
+clusternum.mean <- ggplot(clusternum, aes(x = factor(k), y = Mean.distance)) +
+  geom_boxplot(fill = "#6E9FC6", outlier.size = 1) +
+  labs(
+    x     = "Cluster"
+  ) +
+  theme_minimal(base_size = 14)
+
+# Mean.var
+clusternum.var <- ggplot(clusternum, aes(x = factor(k), y = Mean.var)) +
+  geom_boxplot(fill = "#6E9FC6", outlier.size = 1) +
+  labs(
+    x     = "Cluster"
+  ) +
+  theme_minimal(base_size = 14)
+
+# Specks
+clusternum.speck <- ggplot(clusternum, aes(x = factor(k), y = Speck)) +
+  geom_boxplot(fill = "#6E9FC6", outlier.size = 1) +
+  labs(
+    x     = "Cluster",
+    y     = "Specks"
+  ) +
+  theme_minimal(base_size = 14)
+
+
+print(clusternum.gini)
+print(clusternum.sil)
+print(clusternum.mean)
+print(clusternum.var)
+print(clusternum.speck)
+
+```
+
+#### p
+```{r}
+variable <- result %>%
+  mutate(separation = factor(p,
+                             levels = sort(unique(p)),
+                             labels = sort(unique(p))))
+
+# Diff.gini
+variable.gini <- ggplot(variable, aes(x = factor(p), y = Diff.gini)) +
+  geom_boxplot(fill = "#6E9FC6", outlier.size = 1) +
+  labs(
+    x     = "Variables"
+  ) +
+  theme_minimal(base_size = 14)
+
+# Diff.sil
+variable.sil <- ggplot(variable, aes(x = factor(p), y = Diff.sil)) +
+  geom_boxplot(fill = "#6E9FC6", outlier.size = 1) +
+  labs(
+    x     = "Variables"
+  ) +
+  theme_minimal(base_size = 14)
+
+# Mean.distance
+variable.mean <- ggplot(variable, aes(x = factor(p), y = Mean.distance)) +
+  geom_boxplot(fill = "#6E9FC6", outlier.size = 1) +
+  labs(
+    x     = "Variables"
+  ) +
+  theme_minimal(base_size = 14)
+
+# Mean.var
+variable.var <- ggplot(variable, aes(x = factor(p), y = Mean.var)) +
+  geom_boxplot(fill = "#6E9FC6", outlier.size = 1) +
+  labs(
+    x     = "Variables"
+  ) +
+  theme_minimal(base_size = 14)
+
+# Specks
+variable.speck <- ggplot(variable, aes(x = factor(p), y = Speck)) +
+  geom_boxplot(fill = "#6E9FC6", outlier.size = 1) +
+  labs(
+    x     = "Cluster",
+    y     = "Specks"
+  ) +
+  theme_minimal(base_size = 14)
+
+
+print(variable.gini)
+print(variable.sil)
+print(variable.mean)
+print(variable.var)
+print(variable.speck)
+```
+
+#### Correlation
+```{r}
+correlation <- result %>%
+  mutate(separation = factor(rho,
+                             levels = sort(unique(rho)),
+                             labels = sort(unique(rho))))
+
+# Diff.gini
+correlation.gini <- ggplot(correlation, aes(x = factor(rho), y = Diff.gini)) +
+  geom_boxplot(fill = "#6E9FC6", outlier.size = 1) +
+  labs(
+    x     = "Correlation"
+  ) +
+  theme_minimal(base_size = 14)
+
+# Diff.sil
+correlation.sil <- ggplot(correlation, aes(x = factor(rho), y = Diff.sil)) +
+  geom_boxplot(fill = "#6E9FC6", outlier.size = 1) +
+  labs(
+    x     = "Correlation"
+  ) +
+  theme_minimal(base_size = 14)
+
+# Mean.distance
+correlation.mean <- ggplot(correlation, aes(x = factor(rho), y = Mean.distance)) +
+  geom_boxplot(fill = "#6E9FC6", outlier.size = 1) +
+  labs(
+    x     = "Correlation"
+  ) +
+  theme_minimal(base_size = 14)
+
+# Mean.var
+correlation.var <- ggplot(correlation, aes(x = factor(rho), y = Mean.var)) +
+  geom_boxplot(fill = "#6E9FC6", outlier.size = 1) +
+  labs(
+    x     = "Correlation"
+  ) +
+  theme_minimal(base_size = 14)
+
+# Specks
+correlation.speck <- ggplot(correlation, aes(x = factor(rho), y = Speck)) +
+  geom_boxplot(fill = "#6E9FC6", outlier.size = 1) +
+  labs(
+    x     = "Cluster",
+    y     = "Specks"
+  ) +
+  theme_minimal(base_size = 14)
+
+print(correlation.gini)
+print(correlation.sil)
+print(correlation.mean)
+print(correlation.var)
+print(correlation.speck)
+```
+
+
+
+### Graphic matriz
+```{r}
+library(patchwork)
+          
+layout <- ( (distance.speck  | clusternum.speck  | variable.speck) ) 
+
+print(layout)
+
+ggsave(
+  filename = "specks_vs_factors.png",
+  plot     = layout,
+  width    = 12,
+  height   = 6,
+  dpi      = 300
+)
+```
+
+### Petits resultats
+-   Correlation is not relevant.
+-   Method is not relevant. "Norm" method require more computation cost. 
+
+
+## Method
+```{r}
+result <- rbind(result_norm_50_allmetrics, result_cart_50_allmetrics)
+
+result <- result %>%
+  mutate(Diff.gini = Gini.real - Gini.synt) %>%
+  mutate(Diff.sil = Sil.real - Sil.synt)
+
+
+methodgen <- result %>%
+  mutate(separation = factor(method,
+                             levels = sort(unique(method)),
+                             labels = sort(unique(method))))
+
+# Diff.gini
+method.gini <- ggplot(methodgen, aes(x = method, y = Diff.gini)) +
+  geom_boxplot(fill = "#6E9FC6", outlier.size = 1) +
+  labs(
+    x     = "Method",
+    y     = "Diff.gini"
+  ) +
+  theme_minimal(base_size = 14)
+
+# Diff.sil
+method.sil <- ggplot(methodgen, aes(x = method, y = Diff.sil)) +
+  geom_boxplot(fill = "#6E9FC6", outlier.size = 1) +
+  labs(
+    x     = "Method",
+    y     = "Diff.sil"
+  ) +
+  theme_minimal(base_size = 14)
+
+# Mean.distance
+method.mean <- ggplot(methodgen, aes(x = method, y = Mean.distance)) +
+  geom_boxplot(fill = "#6E9FC6", outlier.size = 1) +
+  labs(
+    x     = "Method",
+    y     = "Mean.distance"
+  ) +
+  theme_minimal(base_size = 14)
+
+# Mean.var
+method.var <- ggplot(methodgen, aes(x = method, y = Mean.var)) +
+  geom_boxplot(fill = "#6E9FC6", outlier.size = 1) +
+  labs(
+    x     = "Method",
+    y     = "Mean.var"
+  ) +
+  theme_minimal(base_size = 14)
+
+layout <- ( (method.gini | method.sil | method.mean | method.var) )
+print(layout)
+
+ggsave(
+  filename = "clustering_summary_method.png",
+  plot     = layout,
+  width    = 12, 
+  height   = 6,
+  dpi      = 300
+)
+```
+
+## Sil according to method
+```{r}
+result <- result_cart_50_allmetrics
+
+result <- result %>%
+  mutate(Diff.gini = Gini.real - Gini.synt) %>%
+  mutate(Diff.sil = Sil.real - Sil.synt)
+
+
+distance <- result %>%
+  mutate(separation = factor(separation,
+                             levels = sort(unique(separation)),
+                             labels = paste0(sort(unique(separation)), "σ")))
+distance.sil.cart <- ggplot(distance, aes(x = separation, y = Diff.sil)) +
+  geom_boxplot(fill = "#6E9FC6", outlier.size = 1) +
+  labs(
+    x     = "Separation",
+    y     = "Diff.sil"
+  ) +
+  theme_minimal(base_size = 14)
+
+clusternum <- result %>%
+  mutate(separation = factor(k,
+                             levels = sort(unique(k)),
+                             labels = sort(unique(k))))
+clusternum.sil.cart <- ggplot(clusternum, aes(x = factor(k), y = Diff.sil)) +
+  geom_boxplot(fill = "#6E9FC6", outlier.size = 1) +
+  labs(
+    x     = "Cluster"
+  ) +
+  theme_minimal(base_size = 14)
+
+variable <- result %>%
+  mutate(separation = factor(p,
+                             levels = sort(unique(p)),
+                             labels = sort(unique(p))))
+variable.sil.cart <- ggplot(variable, aes(x = factor(p), y = Diff.sil)) +
+  geom_boxplot(fill = "#6E9FC6", outlier.size = 1) +
+  labs(
+    x     = "Variables"
+  ) +
+  theme_minimal(base_size = 14)
+
+
+layout <- ( (distance.sil.norm | clusternum.sil.norm | variable.sil.norm) / 
+            (distance.sil.cart | clusternum.sil.cart | variable.sil.cart) )
+print(layout)
+
+ggsave(
+  filename = "clustering_summary_method.png",
+  plot     = layout,
+  width    = 12,
+  height   = 6, 
+  dpi      = 300
+)
+
+row_title_norm <- ggplot() + 
+  annotate("text", x = 0, y = 0, label = "norm", angle = 90, size = 7) +
+  theme_void()
+
+row_title_cart <- ggplot() + 
+  annotate("text", x = 0, y = 0, label = "cart", angle = 90, size = 7) +
+  theme_void()
+
+layout <- (
+  (row_title_norm | distance.sil.norm | clusternum.sil.norm | variable.sil.norm) /
+  (row_title_cart | distance.sil.cart  | clusternum.sil.cart  | variable.sil.cart)
+) 
+
+print(layout)
+
+ggsave(
+  filename = "clustering_method_gini.png",
+  plot     = layout,
+  width    = 12, 
+  height   = 5, 
+  dpi      = 300 
+)
+```
+
+# (3). Gini for unbalances cluster
+
+## Function for unbalanced data generation
+```{r}
+data.generation.nobalance <- function(N, p, rho, separation, k){
+  # Centroid positions
+  centroids <- centroid.generation(k = k, p = p, separation = separation)
+  
+  # Correlation matrix
+  R <- matrix(rho, nrow = p, ncol = p)
+  diag(R) <- 1
+  
+  # Covariance matrix
+  sd <- rep(1, p)
+  D <- diag(sd)
+  Sigma <- D %*% R %*% D  # covariance = D * R * D
+  
+  # Data generation for each cluster
+  prop <- switch(as.character(k),
+                 `2` = c(.4, .6),
+                 `3` = c(.3, .4, .3),
+                 `4` = c(.2, .4, .15, .25))  # unbalanced proportions
+  n <- round(prop * N, digits = 0)
+  
+  # Adjustment if rounding error causes total N mismatch
+  diff <- N - sum(n)
+  if(diff != 0) n[which.min(n)] <- n[which.min(n)] + diff
+  
+  clusters <- lapply(1:k, function(i) {
+    rmvnorm(n[i],
+            mean  = centroids[i, ],
+            sigma = Sigma)
+  })
+  data <- do.call(rbind, clusters)
+  data <- data.frame(data, group = factor(rep(1:k, times = n)))
+  
+  # Graphical representation of the first two dimensions
+  Graphic <- ggplot(data, aes(x = X1, y = X2, color = group)) +
+    geom_point(size = 2) +
+    scale_color_brewer(palette = "Set1") +
+    labs(
+      title = "First dimension representation",
+      color = "Cluster"
+    ) +
+    theme_minimal(base_size = 14)
+  
+  result <- list("Data" = data[ , -ncol(data)], "Graphic" = Graphic, "Clusters" = clusters)
+}
+```
+
+## Test
+```{r}
+simulate_one <- function(factor.combination)
+{
+  N <- factor.combination$N
+  p <- factor.combination$p
+  k <- factor.combination$k
+  rho <- factor.combination$rho
+  method <- factor.combination$method
+  separation <- factor.combination$separation
+  total.m <- total.m
+  
+  count <- 0
+  repeat{
+    set.seed(count)
+    real.data <- data.generation.nobalance(N, p, rho, separation, k)$Data
+  
+    kd        <- k.decision.noscale(real.data, synthetic = FALSE)
+    k.real    <- kd$`K optim`
+    if(k.real == k) break
+    
+    count <- count + 1
+    if(count >= total.m){
+      warning("No combination of data with %k number of clusters found")
+    }
+  }
+  
+  km.real   <- kd$Clustering
+  vars <- names(real.data)
+  
+  gini.real <- Gini(km.real$size)
+  
+  lreal.data <- real.data
+  lreal.data$label <- as.factor(km.real$cluster)
+  
+  out <- data.frame()
+  
+  # Synthetic data generation
+  count <- 0
+  m <- 0
+  synt.data <- list()
+  km.synt <- list()
+  k.synt <- numeric()
+  speck <- numeric()
+  while(m <= total.m){
+    set.seed(m + count)
+    count <- count + 1
+    syn   <- synt.data.generation(real.data, m = 1, methods = method)
+    clust <- k.decision.noscale(syn$`Syn data`, k.real = k.real)
+    if(!is.null(clust)){
+      m <- m + 1
+      synt.data[[m]] <- syn$`Syn data`
+      km.synt[[m]] <- clust$Clustering
+      k.synt[m] <- clust$`K optim`
+      speck[m] <- syn$Specks$SPECKS
+    }
+  }
+  
+  ls.km.synt <- lapply(km.synt, label.switching, km.real) #synthetic data after label switching
+  
+  # Metrics
+  gini.syn <- sapply(km.synt, function(km) Gini(km$size))
+        
+  mean.distance <- numeric(m)
+  for (i in seq_along(km.synt)){
+    lsynt.data <- synt.data[[i]]
+    lsynt.data$label <- factor(ls.km.synt[[i]]$recluster)
+    real.centroid <- aggregate(. ~ label,
+                                data = lreal.data[, c(vars, "label")],
+                                FUN = base::mean)
+    synt.centroid <- aggregate(. ~ label,
+                                data = lsynt.data[, c(vars, "label")],
+                                FUN = base::mean)
+    real.centroid <- real.centroid[order(real.centroid$label), ]
+    synt.centroid <- synt.centroid[order(synt.centroid$label), ]
+        
+    mat.real <- as.matrix(real.centroid[, vars])
+    mat.synt <- as.matrix(synt.centroid[, vars])
+    distances <- sqrt(rowSums((mat.real - mat.synt)^2))
+    mean.distance[i] <- mean(distances)
+  }      
+  out <- rbind(out,
+    data.frame(N = rep(N, m),
+               p = rep(p, m),
+               k = rep(k, m),
+               rho = rep(rho, m),
+               method = rep(method, m),
+               separation = rep(separation, m),
+               k.real = rep(k.real, m),
+               Speck = speck,
+               count = rep(count, m),
+               Gini.real = rep(gini.real, m),
+               Gini.synt = gini.syn,
+               Mean.distance = mean.distance))
+  return(out)
+}
+
+
+n.cores <- detectCores() - 1
+cl <- makeCluster(n.cores)
+total.m <- 50
+
+
+clusterEvalQ(cl, {
+  library(mvtnorm)
+  library(NbClust)
+  library(synthpop)
+  library(clue)
+  library(DescTools)
+  library(factoextra)
+})
+
+
+clusterExport(cl, # functions
+  varlist = c("simulate_one",
+              "data.generation.nobalance",
+              "centroid.generation",
+              "synt.data.generation",
+              "k.decision.noscale",
+              "label.switching",
+              "specks.correct",
+              "total.m"),
+  envir = .GlobalEnv)
+
+
+clusterSetRNGStream(cl, iseed = 123)
+
+method <- c("cart")
+N <- c(250)
+p <- c(2,5,10)
+rho <- c(0)
+k <- c(2, 3, 4)
+separation <- c(0.1, 2, 6, 10)
+
+param.grid <- expand.grid(N = N,
+                          p = p,
+                          k = k,
+                          rho = rho,
+                          method = method,
+                          separation = separation,
+                          KEEP.OUT.ATTRS = FALSE)
+
+result.list <- parLapply(
+  cl,
+  X   = split(param.grid, seq_len(nrow(param.grid))),
+  fun = simulate_one
+)
+
+result_gininobalance <- do.call(rbind, result.list)
+
+result <- result_gininobalance
+result <- result %>%
+  mutate(Diff.gini = Gini.real - Gini.synt)
+
+stopCluster(cl)
+```
+
+## Graphic
+```{r}
+###### Separation ######
+distance <- result %>%
+  mutate(separation = factor(separation,
+                             levels = sort(unique(separation)),
+                             labels = paste0(sort(unique(separation)), "σ")))
+
+# Diff.gini
+distance.gini <- ggplot(distance, aes(x = separation, y = Diff.gini)) +
+  geom_boxplot(fill = "#6E9FC6", outlier.size = 1) +
+  labs(
+    x     = "Separation",
+    y     = "Diff.gini"
+  ) +
+  theme_minimal(base_size = 14)
+
+# Mean.distance
+distance.mean <- ggplot(distance, aes(x = separation, y = Mean.distance)) +
+  geom_boxplot(fill = "#6E9FC6", outlier.size = 1) +
+  labs(
+    x     = "Separation",
+    y     = "Mean.distance"
+  ) +
+  theme_minimal(base_size = 14)
+
+# Specks
+distance.speck <- ggplot(distance, aes(x = separation, y = Speck)) +
+  geom_boxplot(fill = "#6E9FC6", outlier.size = 1) +
+  labs(
+    x     = "Separation",
+    y     = "Speck"
+  ) +
+  theme_minimal(base_size = 14)
+
+
+###### Cluster ######
+clusternum <- result %>%
+  mutate(separation = factor(k,
+                             levels = sort(unique(k)),
+                             labels = sort(unique(k))))
+
+# Diff.gini
+clusternum.gini <- ggplot(clusternum, aes(x = factor(k), y = Diff.gini)) +
+  geom_boxplot(fill = "#6E9FC6", outlier.size = 1) +
+  labs(
+    x     = "Cluster"
+  ) +
+  theme_minimal(base_size = 14)
+
+# Mean.distance
+clusternum.mean <- ggplot(clusternum, aes(x = factor(k), y = Mean.distance)) +
+  geom_boxplot(fill = "#6E9FC6", outlier.size = 1) +
+  labs(
+    x     = "Cluster"
+  ) +
+  theme_minimal(base_size = 14)
+
+# Specks
+clusternum.speck <- ggplot(clusternum, aes(x = factor(k), y = Speck)) +
+  geom_boxplot(fill = "#6E9FC6", outlier.size = 1) +
+  labs(
+    x     = "Cluster",
+    y     = "Speck"
+  ) +
+  theme_minimal(base_size = 14)
+
+
+###### p ######
+variable <- result %>%
+  mutate(separation = factor(p,
+                             levels = sort(unique(p)),
+                             labels = sort(unique(p))))
+
+# Diff.gini
+variable.gini <- ggplot(variable, aes(x = factor(p), y = Diff.gini)) +
+  geom_boxplot(fill = "#6E9FC6", outlier.size = 1) +
+  labs(
+    x     = "Variables"
+  ) +
+  theme_minimal(base_size = 14)
+
+# Mean.distance
+variable.mean <- ggplot(variable, aes(x = factor(p), y = Mean.distance)) +
+  geom_boxplot(fill = "#6E9FC6", outlier.size = 1) +
+  labs(
+    x     = "Variables"
+  ) +
+  theme_minimal(base_size = 14)
+
+variable.speck <- ggplot(variable, aes(x = factor(p), y = Speck)) +
+  geom_boxplot(fill = "#6E9FC6", outlier.size = 1) +
+  labs(
+    x     = "Cluster",
+    y     = "Specks"
+  ) +
+  theme_minimal(base_size = 14)
+
+
+# Summary graphic
+layout <- ((distance.speck  | clusternum.speck  | variable.speck) /
+            (distance.gini  | clusternum.gini  | variable.gini ) /
+            (distance.mean  | clusternum.mean  | variable.mean )) + 
+  plot_annotation(title = "Unbalanced clusters")
+
+print(layout)
+
+ggsave(
+  filename = "clustering_summary_nobalance.png",
+  plot     = layout,
+  width    = 12,    # amplada en polzades
+  height   = 6,     # alçada en polzades (2 files × 4 columnes)
+  dpi      = 300    # resolució per a PNG/JPEG
+)
+```
+
+# (4). Count
+```{r}
+result <- result_cart_250
+
+# Data summary according to count
+count.sum <- result %>%                               
+  mutate(success = 50 / count) %>%              
+  select(N, p, k, separation, success) %>% 
+  distinct()
+
+# Compress according to k
+count.sum.k <- count.sum %>% 
+  pivot_wider(names_from = k,
+              values_from = success,
+              names_prefix = "Cluster = ") %>% 
+  arrange(N, p, separation)
+
+# Heatmap
+count.plot <- ggplot(count.sum, aes(x = factor(separation),
+                y = factor(p),
+                fill = success)) +
+  geom_tile(colour = "grey70") +
+  geom_text(aes(label = sprintf("%.3f", success)),
+            color = "black", size = 2) +
+  facet_grid( ~ k, labeller = labeller(k = function(x) paste("Cluster:", x))) +
+  scale_fill_gradient(
+    name  = " ",
+    limits = c(0, 1),
+    breaks = c(0, .25, .5, .75, 1),
+    labels = scales::percent_format(accuracy = 1),
+    low    = "#A5CFE9",
+    high   = "#2A5783"
+  ) +
+  labs(x = "Separation", y = "Variables"
+       ) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid = element_blank(),
+        strip.text = element_text(face = "bold"))
+
+ggsave(
+  filename = "count_summary.png",
+  plot     = count.plot,
+  width    = 5,    # amplada en polzades
+  height   = 4,     # alçada en polzades (2 files × 4 columnes)
+  dpi      = 300    # resolució per a PNG/JPEG
+)
+```
+
+
+
