@@ -1,5 +1,5 @@
 ---
-title: "Per_reu_22_05"
+title: "Purpose1.1"
 author: "Xinnuo Chen"
 date: "2025-05-15"
 output: html_document
@@ -134,7 +134,7 @@ scatterplot3d(data, color = as.numeric(labels), pch = 19,
               main = "Two clusters separated by 2σ in 3D")
 ```
 
-### Funció per obtenir controides
+### Centroid obtain function
 ```{r}
 centroid.generation <- function(k = k, p = p, separation = separation) {
   centroids <- matrix(NA, nrow = k, ncol = p)
@@ -164,7 +164,7 @@ dist(centroids)
 
 ```
 
-### Funció de generació de dades
+### Data generation function
 ```{r}
 # library(ggplot)
 # Synthetic data generation
@@ -285,9 +285,9 @@ rcorrmatrix(d, alphad = alphad)
 
 ## library(MixSim) -> NO USE
 
-Se consigue la generación de clusters con las separaciones deseadas.
-sph=TRUE, fuerza una matriz de covariancia esférica, es decir correlación nula.
-sph=FALSE y controlando el valor de ecc, más o menos da alguna diferencia en correlación, pero no existe un patrón que permita controlar.
+Clusters are generated with the desired separations.
+sph=TRUE forces a spherical covariance matrix, i.e., zero correlation.
+sph=FALSE and controlling the value of ecc gives more or less some difference in correlation, but there is no pattern that allows control.
 ```{r}
 library(MixSim)
 
@@ -477,7 +477,7 @@ From the dataframe containing all possible combinations of the factors taken int
 
 It is necessary to correct the problem with the while loop, where syn generated identical synthetic data and caused the search to become infinite.
 
-# (5). Resultat
+# (5). Result
 
 ```{r}
 # library(parallel)
