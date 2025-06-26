@@ -4,8 +4,8 @@ author: "Xinnuo Chen"
 date: "2025-04-25"
 output: html_document
 ---
-Dataset de 8 variables normals, 800 observacions (més casos), i amb cluster menys diferencials.
-Els propensity scores utilitzats per dur el càlcul del SPECKS s'obtenen mitjançant un model logit (anteriorment CART). -> Resultats més bons. 
+Dataset with 8 normal variables, 800 observations (more cases), and fewer differential clusters.
+The propensity scores used to calculate SPECKS are obtained using a logit model (previously CART). -> Better results. 
 
 # Libraries
 ```{r}
