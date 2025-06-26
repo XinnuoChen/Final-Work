@@ -6,26 +6,25 @@ output: html_document
 ---
 
 ```{r}
-# Functions i lybraries
+# Functions and libraries
 library(ggplot2)
 library(mvtnorm)
 library(synthpop)
 library(NbClust)
 library(ggplot2)
 library(factoextra)
-library(DescTools) #index de Gini
-library(cluster) #index de Silhouette
-library(car) #scatterplot
+library(DescTools) # Gini index
+library(cluster)   # Silhouette index
+library(car)       #scatterplot
 library(tidyverse)
-library(clue) #label switching
-library(caret) #calcular accuracy
+library(clue)      #label switching
 library(rpart)
 library(dgof)
 library(dplyr)
 library(tibble)
 library(paletteer)
 library(scales)
-library(tidyr)    # pivot_longer
+library(tidyr)     # pivot_longer
 library(mvtnorm)
 
 synt.data.generation <- function(real.data, m, methods){
