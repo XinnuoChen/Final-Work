@@ -1,12 +1,12 @@
 ---
-title: "REU0605"
+title: "Purpose1.2"
 author: "Xinnuo Chen"
 date: "2025-06-01"
 output: html_document
 ---
 
 ```{r}
-# Funcions i llibreries
+# Functions i lybraries
 library(ggplot2)
 library(mvtnorm)
 library(synthpop)
@@ -83,21 +83,21 @@ label.switching <- function(km.real, km.synt){ # Label switching function
 
 centroid.generation <- function(k = k, p = p, separation = separation) {
   centroids <- matrix(NA, nrow = k, ncol = p)
-  centroids[1, ] <- rep(0, p)                 # primer centroide a l'origen 
+  centroids[1, ] <- rep(0, p)
   for (i in 2:k) {
     tries <- 0
     repeat {
-      vector <- rnorm(p)                      # un punt aleatori
-      vector <- vector / sqrt(sum(vector^2))  # normalitzar el vector del punt
-      vector <- vector * separation           # punt a distància separation de l’origen
+      vector <- rnorm(p)     
+      vector <- vector / sqrt(sum(vector^2)) 
+      vector <- vector * separation
       
-      dists <- sqrt(rowSums((centroids[1:(i - 1), , drop = FALSE] -  # distàncies del nou punt amb cada un dels ja fixats.
+      dists <- sqrt(rowSums((centroids[1:(i - 1), , drop = FALSE] -  
                              matrix(vector, nrow = i - 1, ncol = p, byrow = TRUE))^2))
-      if (all(dists >= separation)) {         # si el nou punt compleix la separació s'accepta
+      if (all(dists >= separation)) {    
         centroids[i, ] <- vector
         break
       }
-      tries <- tries + 1                      # evitar bucle infinit
+      tries <- tries + 1              
       if (tries > 1000) stop("No s'han pogut generar centroides prou separats.")
     }
   }
@@ -105,19 +105,19 @@ centroid.generation <- function(k = k, p = p, separation = separation) {
 }
 
 data.generation <- function(N, p, rho, separation, k){
-  # posició dels centroides
+  # centroid position
   centroids <- centroid.generation(k = k, p = p, separation = separation)
   
-  # matriu de correlacions
+  # correlation matrix 
   R <- matrix(rho, nrow = p, ncol = p)
   diag(R) <- 1
   
-  # matriu de covariàncies
+  # covariance matrix 
   sd <- rep(1, p)
   D <- diag(sd)
   Sigma <- D %*% R %*% D  #
   
-  # generació de dades per cada cluster
+  # data generation for each cluster 
   n <- round(N/k, digits = 0)
   clusters <- lapply(1:k, function(i) {
     rmvnorm(n,
@@ -127,7 +127,7 @@ data.generation <- function(N, p, rho, separation, k){
   data <- do.call(rbind, clusters)
   data <- data.frame(data, group = factor(rep(1:k, each = n)))
   
-  # representació gràfica
+  # graphic representation 
   Graphic <- ggplot(data, aes(x = X1, y = X2, color = group)) +
                 geom_point(size = 2) +
                 scale_color_brewer(palette = "Set1") +
@@ -188,7 +188,7 @@ k.decision <- function(data, k.real = 0, synthetic = TRUE){ # K decision & clust
     
     if(kopt == k.real){
       sdata <- scale(data)
-      clust <- kmeans(sdata, kopt, nstart = 25) #resultado de clustering
+      clust <- kmeans(sdata, kopt, nstart = 25) # clustering result
       
       clustering.result <- list("K optim" = kopt, "Clustering" = clust)
       return(clustering.result)
